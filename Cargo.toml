@@ -1,0 +1,7 @@
+[package]
+name = "djinn_basic"
+version = "0.1.0"
+authors = ["Francis Tseng <f+accounts@frnsys.com>"]
+
+[dependencies]
+rustc-serialize = "*"
