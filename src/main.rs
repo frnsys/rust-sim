@@ -3,9 +3,8 @@
 extern crate rustc_serialize;
 
 use std::fmt::Debug;
-use std::iter::Filter;
-use std::marker::PhantomData;
-use std::collections::hash_map::{HashMap, Values};
+use std::net::SocketAddr;
+use std::collections::hash_map::HashMap;
 use rustc_serialize::{Decodable, Encodable};
 
 pub trait State: Decodable + Encodable + Debug + Send + Sync + Clone + PartialEq {}
@@ -23,20 +22,23 @@ pub trait Agent: Send + Sync {
     fn decide(&self) -> ();
     fn state(&self) -> Self::State;
     fn set_state(&mut self, state: Self::State) -> ();
-    fn updates(&self) -> Vec<Self::Update>;
+    fn updates(&self) -> &Vec<Self::Update>;
+    fn queue_updates(&mut self, updates: &mut Vec<Self::Update>) -> ();
     fn apply_update(&self, state: Self::State, update: Self::Update) -> Self::State;
     fn update(&mut self) -> () {
         let mut state = self.state();
         for update in self.updates() {
-            state = self.apply_update(state, update);
+            state = self.apply_update(state, update.clone());
         }
+        // TODO reset updates
         self.set_state(state);
     }
 }
 
-pub enum AgentProxy<A: Agent> {
-    Local(A),
-    Remote(A), // TODO
+#[derive(PartialEq, Eq, Hash)]
+pub enum AgentProxy {
+    Local(usize),
+    Remote(usize, SocketAddr), // TODO
 }
 
 // TODO agents need some way of finding other agents
@@ -50,35 +52,84 @@ pub enum AgentProxy<A: Agent> {
 pub struct Manager<A: Agent> {
     lookup: HashMap<usize, A>,
     last_id: usize,
+    updates: HashMap<AgentProxy, Vec<A::Update>>,
 }
 
 impl<A: Agent> Manager<A> {
     pub fn new() -> Manager<A> {
         Manager {
             lookup: HashMap::<usize, A>::new(),
+            updates: HashMap::<AgentProxy, Vec<A::Update>>::new(),
             last_id: 0,
         }
     }
+
+    /// Spawn a new agent in this manager.
     pub fn spawn(&mut self, state: A::State) {
         let agent = A::new(state);
         self.lookup.insert(self.last_id, agent);
         self.last_id += 1;
     }
-    pub fn filter<'a, P>(&'a self, predicate: &'a P) -> impl Iterator<Item = &'a A> + 'a
+
+    /// TODO when we connect in remote managers, this should probably return a future iterator
+    pub fn filter<'a, P>(&'a self, predicate: &'a P) -> impl Iterator<Item = AgentProxy> + 'a
         where P: Fn(A::State) -> bool
     {
-        self.lookup.values().filter(move |&a| predicate(a.state()))
+        self.lookup
+            .iter()
+            .filter(move |&(_, ref a)| predicate(a.state()))
+            .map(|(&id, _)| AgentProxy::Local(id))
         // TODO remote lookup
     }
-    // pub fn find<F>(&self, predicate: F) TODO short circuit when found
-    pub fn submit_update(agent: AgentProxy<A>, update: A::Update) {
-        // TODO when sending to remote agents, we can just locally queue all outgoing updates
-        // and send them all at the end of the simulation step
+
+    /// TODO this should probably return a future as well
+    pub fn find<P>(&self, predicate: P) -> Option<&A>
+        where P: Fn(A::State) -> bool
+    {
+        self.lookup.values().find(move |&a| predicate(a.state()))
+        // TODO remote lookup
     }
 
-    // TODO
-    pub fn decide() {}
-    pub fn update() {}
+    /// Queues an update for an agent.
+    /// The update is queued locally in the manager until the end of the step.
+    pub fn queue_update(&mut self, agent: AgentProxy, update: A::Update) {
+        let mut entry = self.updates.entry(agent).or_insert(Vec::new());
+        entry.push(update);
+    }
+
+    /// Pushes queued updates to agents.
+    pub fn push_updates(&mut self) {
+        for (proxy, updates) in self.updates.iter_mut() {
+            match proxy {
+                &AgentProxy::Local(id) => {
+                    match self.lookup.get_mut(&id) {
+                        Some(agent) => agent.queue_updates(updates),
+                        None => println!("TODO"),
+                    }
+                }
+                &AgentProxy::Remote(id, addr) => {
+                    // TODO submit remote update
+                }
+            }
+        }
+        self.updates.clear();
+    }
+
+    /// Calls the `decide` method on all local agents.
+    /// TODO make this multithreaded
+    pub fn decide(&self) {
+        for agent in self.lookup.values() {
+            agent.decide();
+        }
+    }
+
+    /// Calls the `update` method on all local agents.
+    /// TODO make this multithreaded
+    pub fn update(&mut self) {
+        for (_, agent) in self.lookup.iter_mut() {
+            agent.update();
+        }
+    }
 }
 
 // ---
@@ -93,6 +144,7 @@ pub struct MyState {
 
 pub struct MyAgent {
     state: MyState,
+    updates: Vec<MyUpdate>,
 }
 
 #[derive(RustcDecodable, RustcEncodable, Debug, PartialEq, Clone)]
@@ -105,7 +157,10 @@ impl Agent for MyAgent {
     type State = MyState;
     type Update = MyUpdate;
     fn new(state: MyState) -> MyAgent {
-        MyAgent { state: state }
+        MyAgent {
+            state: state,
+            updates: Vec::new(),
+        }
     }
     fn decide(&self) -> () {}
     fn state(&self) -> MyState {
@@ -114,10 +169,11 @@ impl Agent for MyAgent {
     fn set_state(&mut self, state: MyState) -> () {
         self.state = state;
     }
-    fn updates(&self) -> Vec<MyUpdate> {
-        let mut v = Vec::<MyUpdate>::new();
-        v.push(MyUpdate::ChangeName("bar".to_string()));
-        v
+    fn updates(&self) -> &Vec<MyUpdate> {
+        &self.updates
+    }
+    fn queue_updates(&mut self, updates: &mut Vec<MyUpdate>) -> () {
+        self.updates.append(updates);
     }
     fn apply_update(&self, state: MyState, update: MyUpdate) -> Self::State {
         match update {
@@ -138,12 +194,11 @@ impl Agent for MyAgent {
 }
 
 fn main() {
-    let mut agent = MyAgent {
-        state: MyState {
-            name: "hello".to_string(),
-            health: 0,
-        },
+    let state = MyState {
+        name: "hello".to_string(),
+        health: 0,
     };
+    let mut agent = MyAgent::new(state);
     let update = MyUpdate::ChangeHealth(10);
     println!("{:?}", agent.state);
     agent.state = agent.apply_update(agent.state(), update);
