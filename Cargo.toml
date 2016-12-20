@@ -4,6 +4,8 @@ version = "0.1.0"
 authors = ["Francis Tseng <f+accounts@frnsys.com>"]
 
 [dependencies]
-time = "*"
 rand = "*"
 rustc-serialize = "*"
+
+[dev-dependencies]
+time = "*"

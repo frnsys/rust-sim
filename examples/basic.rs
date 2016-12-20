@@ -43,6 +43,7 @@ impl Agent for MyAgent {
     fn id(&self) -> usize {
         self.id
     }
+    fn setup(&mut self, world: &Self::World) -> () {}
     fn decide<M: Manager<Self>>(&self,
                                 world: &Self::World,
                                 manager: &M)

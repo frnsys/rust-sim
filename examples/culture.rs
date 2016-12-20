@@ -4,7 +4,7 @@ extern crate rand;
 extern crate rustc_serialize;
 
 use time::PreciseTime;
-use rand::{thread_rng, Rng};
+use rand::{thread_rng, Rng, sample};
 use sim::{Agent, Manager, LocalManager, AgentProxy, AgentPath};
 
 // TODO may be possible to even do an enum of states? that's how you could represent different
@@ -20,10 +20,17 @@ pub struct Person {
     id: usize,
     state: State,
     updates: Vec<Update>,
+    friends: Vec<AgentPath>,
 }
 
-#[derive(RustcDecodable, RustcEncodable, Debug, PartialEq, Clone)]
+#[derive(RustcDecodable, RustcEncodable, Debug, Clone)]
 pub struct World {}
+
+impl World {
+    pub fn new() -> World {
+        World {}
+    }
+}
 
 #[derive(RustcDecodable, RustcEncodable, Debug, PartialEq, Clone)]
 pub enum Update {
@@ -39,22 +46,26 @@ impl Agent for Person {
             id: id,
             state: state,
             updates: Vec::new(),
+            friends: Vec::new(),
         }
     }
     fn id(&self) -> usize {
         self.id
     }
+    fn setup(&mut self, world: &Self::World) -> () {}
     fn decide<M: Manager<Self>>(&self,
                                 world: &Self::World,
                                 manager: &M)
                                 -> Vec<(AgentPath, Self::Update)> {
         let mut updates = Vec::new();
 
-        // this doesn't scale well with agent population
-        let others = manager.sample(1);
-        let ref other = others[0];
-
-        updates.push((AgentPath::Local(self.id), Update::Imitate(other.state.clone())));
+        for friend_path in self.friends.iter() {
+            let friend = match manager.get(friend_path.clone()) {
+                Some(a) => a,
+                None => panic!("couldnt find friend: {:?}", friend_path),
+            };
+            updates.push((AgentPath::Local(self.id), Update::Imitate(friend.state.clone())));
+        }
         updates
     }
     fn state(&self) -> State {
@@ -84,6 +95,8 @@ impl Agent for Person {
 }
 
 fn main() {
+    let start = PreciseTime::now();
+
     let state = State {
         altruism: 0.5,
         frugality: 0.5,
@@ -93,19 +106,41 @@ fn main() {
         frugality: 1.,
     };
 
-    let world = World {};
+    let world = World::new();
     let mut manager = LocalManager::<Person>::new(world);
 
+    let mut ids = Vec::new();
     let mut rng = thread_rng();
-    for i in 0..500 {
+    for i in 0..1000 {
         let roll: f64 = rng.gen();
         let s = if roll <= 0.5 {
             state.clone()
         } else {
             state2.clone()
         };
-        manager.spawn(s);
+        let id = manager.spawn(s);
+        ids.push(id);
     }
+
+    // assign friends
+    let n_friends = 10;
+    for id in ids.clone() {
+        match manager.lookup.get_mut(&id) {
+            Some(a) => {
+                let friends = sample(&mut rng, ids.clone(), n_friends);
+                for id in friends {
+                    a.friends.push(AgentPath::Local(id));
+                }
+            }
+            _ => (),
+        }
+    }
+
+    manager.setup();
+
+    let end = PreciseTime::now();
+    println!("setup took: {}", start.to(end));
+
     for i in 0..10 {
         let start = PreciseTime::now();
         manager.decide();

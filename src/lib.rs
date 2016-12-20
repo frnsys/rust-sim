@@ -21,6 +21,7 @@ pub trait Manager<A: Agent>: Send + Sync {
     fn new(world: A::World) -> Self;
     fn spawn(&mut self, state: A::State) -> usize;
     fn push_updates(&mut self) -> ();
+    fn setup(&mut self) -> ();
     fn decide(&mut self) -> ();
     fn update(&mut self) -> ();
     fn world(&self) -> A::World;
@@ -32,6 +33,7 @@ pub trait Manager<A: Agent>: Send + Sync {
         where P: Fn(A::State) -> bool;
     fn find<P>(&self, predicate: P) -> Option<AgentProxy<A>> where P: Fn(A::State) -> bool;
     fn get(&self, path: AgentPath) -> Option<AgentProxy<A>>;
+    // fn get_many(&self, paths: AgentPath) -> Option<AgentProxy<A>>; // TODO
     fn sample(&self, n: usize) -> Vec<AgentProxy<A>>;
     fn sample_by<'a, P>(&'a self,
                         predicate: &'a P,
@@ -40,8 +42,8 @@ pub trait Manager<A: Agent>: Send + Sync {
         where P: Fn(A::State) -> f64;
 }
 
-pub trait World: Decodable + Encodable + Debug + Send + Sync + Clone + PartialEq {}
-impl<T> World for T where T: Decodable + Encodable + Debug + Send + Sync + Clone + PartialEq {}
+pub trait World: Decodable + Encodable + Debug + Send + Sync + Clone {}
+impl<T> World for T where T: Decodable + Encodable + Debug + Send + Sync + Clone {}
 
 pub trait Agent: Send + Sync + Sized {
     type State: State;
@@ -49,15 +51,7 @@ pub trait Agent: Send + Sync + Sized {
     type World: World;
     fn new(state: Self::State, id: usize) -> Self;
     fn id(&self) -> usize;
-    // TODO we have to pass the world or the manager
-    // to the agents during decide
-    // ideally this is a clone of:
-    // - the world state
-    // - agent proxies lookups
-    // ideally we can pass the world/manager without
-    // requiring locks
-    // a RW lock should be ok though; in decide
-    // agents will only need read locks, which is ok concurrent
+    fn setup(&mut self, world: &Self::World) -> ();
     fn decide<M: Manager<Self>>(&self,
                                 world: &Self::World,
                                 manager: &M)
@@ -97,7 +91,7 @@ pub struct AgentProxy<A: Agent> {
 // but the world also needs access to the local population, e.g.
 // to find connected agents in a network
 pub struct LocalManager<A: Agent> {
-    lookup: HashMap<usize, A>,
+    pub lookup: HashMap<usize, A>,
     last_id: usize,
     updates: HashMap<AgentPath, Vec<A::Update>>,
     world: A::World,
@@ -139,7 +133,7 @@ impl<A: Agent> Manager<A> for LocalManager<A> {
         let agent = A::new(state, self.last_id);
         self.lookup.insert(self.last_id, agent);
         self.last_id += 1;
-        self.last_id
+        self.last_id - 1
     }
 
     /// Pushes queued updates to agents.
@@ -156,6 +150,13 @@ impl<A: Agent> Manager<A> for LocalManager<A> {
             }
         }
         self.updates.clear();
+    }
+
+    /// Calls the `setup` method on all local agents.
+    fn setup(&mut self) {
+        for agent in self.lookup.values_mut() {
+            agent.setup(&self.world);
+        }
     }
 
     /// Calls the `decide` method on all local agents.
