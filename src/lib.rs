@@ -23,6 +23,13 @@ pub trait Manager<A: Agent>: Send + Sync {
     fn decide(&self) -> ();
     fn update(&mut self) -> ();
     fn world(&self) -> A::World;
+
+    // TODO for now this returns a Box, ideally we could just use `impl trait` but it doesn't work
+    // on traits atm
+    // fn filter<'a, P>(&'a self, predicate: &'a P) -> impl Iterator<Item = AgentProxy> + 'a
+    fn filter<'a, P>(&'a self, predicate: &'a P) -> Box<Iterator<Item = AgentProxy> + 'a>
+        where P: Fn(A::State) -> bool;
+    fn find<P>(&self, predicate: P) -> Option<&A> where P: Fn(A::State) -> bool;
 }
 
 pub trait World: Decodable + Encodable + Debug + Send + Sync + Clone + PartialEq {}
@@ -147,22 +154,21 @@ impl<A: Agent> Manager<A> for LocalManager<A> {
             agent.update();
         }
     }
-}
 
-impl<A: Agent> LocalManager<A> {
     /// TODO when we connect in remote managers, this should probably return a future iterator
-    pub fn filter<'a, P>(&'a self, predicate: &'a P) -> impl Iterator<Item = AgentProxy> + 'a
+    fn filter<'a, P>(&'a self, predicate: &'a P) -> Box<Iterator<Item = AgentProxy> + 'a>
         where P: Fn(A::State) -> bool
     {
-        self.lookup
+        let iter = self.lookup
             .iter()
             .filter(move |&(_, ref a)| predicate(a.state()))
-            .map(|(&id, _)| AgentProxy::Local(id))
+            .map(|(&id, _)| AgentProxy::Local(id));
+        Box::new(iter)
         // TODO remote lookup
     }
 
     /// TODO this should probably return a future as well
-    pub fn find<P>(&self, predicate: P) -> Option<&A>
+    fn find<P>(&self, predicate: P) -> Option<&A>
         where P: Fn(A::State) -> bool
     {
         self.lookup.values().find(move |&a| predicate(a.state()))
