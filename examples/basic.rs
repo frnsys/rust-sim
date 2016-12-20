@@ -1,7 +1,7 @@
 extern crate sim;
 extern crate rustc_serialize;
 
-use sim::{Agent, Manager, LocalManager, State};
+use sim::{Agent, Manager, LocalManager, State, AgentProxy, AgentPath};
 
 // TODO may be possible to even do an enum of states? that's how you could represent different
 // agent types
@@ -11,6 +11,7 @@ pub struct MyState {
     health: usize,
 }
 
+#[derive(Debug)]
 pub struct MyAgent {
     state: MyState,
     updates: Vec<MyUpdate>,
@@ -37,7 +38,28 @@ impl Agent for MyAgent {
             updates: Vec::new(),
         }
     }
-    fn decide<M: Manager<Self>>(&self, world: &Self::World, manager: &M) -> () {}
+    fn decide<M: Manager<Self>>(&self,
+                                world: &Self::World,
+                                manager: &M)
+                                -> Vec<(AgentProxy<Self>, Self::Update)> {
+        let mut updates = Vec::new();
+        match self.state.name.as_ref() {
+            "hello" => {
+                println!("my name is hello");
+                match manager.find(|s| s.name == "goodbye") {
+                    Some(a) => {
+                        println!("other name: {:?}", a);
+                        updates.push((a, MyUpdate::ChangeHealth(12)));
+                    }
+                    None => println!("not found"),
+                }
+
+            }
+            "goodbye" => println!("my name is goodbye"),
+            _ => println!("my name is unknown"),
+        }
+        updates
+    }
     fn state(&self) -> MyState {
         self.state.clone()
     }
@@ -69,15 +91,23 @@ impl Agent for MyAgent {
 }
 
 fn main() {
+    let health = 10;
     let state = MyState {
         name: "hello".to_string(),
         health: 0,
     };
+    let state2 = MyState {
+        name: "goodbye".to_string(),
+        health: health,
+    };
     let world = MyWorld { weather: "sunny".to_string() };
     let mut manager = LocalManager::<MyAgent>::new(world);
     manager.spawn(state.clone());
-    manager.spawn(state.clone());
+    manager.spawn(state2.clone());
     manager.decide();
     manager.update();
+    let a = manager.get(AgentPath::Local(1)).unwrap();
+    println!("{:?}", a);
     println!("ok");
+    assert_eq!(a.state.health, health + 12);
 }

@@ -17,19 +17,19 @@ impl<T> Update for T where T: Decodable + Encodable + Debug + Send + Sync + Clon
 
 pub trait Manager<A: Agent>: Send + Sync {
     fn new(world: A::World) -> Self;
-    fn spawn(&mut self, state: A::State) -> ();
-    fn queue_update(&mut self, agent: AgentProxy, update: A::Update) -> ();
+    fn spawn(&mut self, state: A::State) -> usize;
     fn push_updates(&mut self) -> ();
-    fn decide(&self) -> ();
+    fn decide(&mut self) -> ();
     fn update(&mut self) -> ();
     fn world(&self) -> A::World;
 
     // TODO for now this returns a Box, ideally we could just use `impl trait` but it doesn't work
     // on traits atm
-    // fn filter<'a, P>(&'a self, predicate: &'a P) -> impl Iterator<Item = AgentProxy> + 'a
-    fn filter<'a, P>(&'a self, predicate: &'a P) -> Box<Iterator<Item = AgentProxy> + 'a>
+    // fn filter<'a, P>(&'a self, predicate: &'a P) -> impl Iterator<Item = AgentProxy<A>> + 'a
+    fn filter<'a, P>(&'a self, predicate: &'a P) -> Box<Iterator<Item = AgentProxy<A>> + 'a>
         where P: Fn(A::State) -> bool;
-    fn find<P>(&self, predicate: P) -> Option<&A> where P: Fn(A::State) -> bool;
+    fn find<P>(&self, predicate: P) -> Option<AgentProxy<A>> where P: Fn(A::State) -> bool;
+    fn get(&self, path: AgentPath) -> Option<AgentProxy<A>>;
 }
 
 pub trait World: Decodable + Encodable + Debug + Send + Sync + Clone + PartialEq {}
@@ -49,7 +49,10 @@ pub trait Agent: Send + Sync + Sized {
     // requiring locks
     // a RW lock should be ok though; in decide
     // agents will only need read locks, which is ok concurrent
-    fn decide<M: Manager<Self>>(&self, world: &Self::World, manager: &M) -> ();
+    fn decide<M: Manager<Self>>(&self,
+                                world: &Self::World,
+                                manager: &M)
+                                -> Vec<(AgentProxy<Self>, Self::Update)>;
     fn state(&self) -> Self::State;
     fn set_state(&mut self, state: Self::State) -> ();
     fn updates(&self) -> &Vec<Self::Update>;
@@ -65,20 +68,18 @@ pub trait Agent: Send + Sync + Sized {
     }
 }
 
-#[derive(PartialEq, Eq, Hash)]
-pub enum AgentProxy {
+#[derive(PartialEq, Eq, Hash, Debug, Clone)]
+pub enum AgentPath {
     Local(usize),
-    Remote(usize, SocketAddr), // TODO
+    Remote(usize, SocketAddr),
 }
 
-// TODO agents need some way of finding other agents
-// and also querying a world state
-// these two don't necessarily be the same (i.e. we can have distinct Manager and World objects)
-// worlds can be local to the node and updated/synchronized between simulation steps
-// this never gives out the actual agent, just a proxy
-// proxies should be cloneable/copiable
-// so perhaps this just keeps a hashmap to LOCAL proxies
-// if a local id is not found, query the leader manager?
+#[derive(Debug, PartialEq, Clone)]
+pub struct AgentProxy<A: Agent> {
+    pub path: AgentPath,
+    pub state: A::State,
+}
+
 // Managers:
 // -- single threaded
 // -- multi threaded
@@ -89,7 +90,7 @@ pub enum AgentProxy {
 pub struct LocalManager<A: Agent> {
     lookup: HashMap<usize, A>,
     last_id: usize,
-    updates: HashMap<AgentProxy, Vec<A::Update>>,
+    updates: HashMap<AgentPath, Vec<A::Update>>,
     world: A::World,
 }
 
@@ -97,9 +98,26 @@ impl<A: Agent> Manager<A> for LocalManager<A> {
     fn new(world: A::World) -> LocalManager<A> {
         LocalManager {
             lookup: HashMap::<usize, A>::new(),
-            updates: HashMap::<AgentProxy, Vec<A::Update>>::new(),
+            updates: HashMap::<AgentPath, Vec<A::Update>>::new(),
             last_id: 0,
             world: world,
+        }
+    }
+
+    fn get(&self, path: AgentPath) -> Option<AgentProxy<A>> {
+        match path {
+            AgentPath::Local(id) => {
+                match self.lookup.get(&id) {
+                    Some(a) => {
+                        Some(AgentProxy {
+                            path: path,
+                            state: a.state(),
+                        })
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
         }
     }
 
@@ -108,32 +126,24 @@ impl<A: Agent> Manager<A> for LocalManager<A> {
     }
 
     /// Spawn a new agent in this manager.
-    fn spawn(&mut self, state: A::State) {
+    fn spawn(&mut self, state: A::State) -> usize {
         let agent = A::new(state);
         self.lookup.insert(self.last_id, agent);
         self.last_id += 1;
-    }
-
-    /// Queues an update for an agent.
-    /// The update is queued locally in the manager until the end of the step.
-    fn queue_update(&mut self, agent: AgentProxy, update: A::Update) {
-        let mut entry = self.updates.entry(agent).or_insert(Vec::new());
-        entry.push(update);
+        self.last_id
     }
 
     /// Pushes queued updates to agents.
     fn push_updates(&mut self) {
         for (proxy, updates) in self.updates.iter_mut() {
             match proxy {
-                &AgentProxy::Local(id) => {
+                &AgentPath::Local(id) => {
                     match self.lookup.get_mut(&id) {
                         Some(agent) => agent.queue_updates(updates),
-                        None => println!("TODO"),
+                        None => println!("No local agent with id {}", id), // TODO this should probably log an error
                     }
                 }
-                &AgentProxy::Remote(id, addr) => {
-                    // TODO submit remote update
-                }
+                _ => (),
             }
         }
         self.updates.clear();
@@ -141,37 +151,59 @@ impl<A: Agent> Manager<A> for LocalManager<A> {
 
     /// Calls the `decide` method on all local agents.
     /// TODO make this multithreaded
-    fn decide(&self) {
+    fn decide(&mut self) {
+        let mut updates = Vec::new();
         for agent in self.lookup.values() {
-            agent.decide(&self.world, self);
+            let u = agent.decide(&self.world, self);
+            updates.extend(u);
+        }
+
+        for (agent, update) in updates {
+            let mut entry = self.updates.entry(agent.path).or_insert(Vec::new());
+            entry.push(update);
         }
     }
 
     /// Calls the `update` method on all local agents.
     /// TODO make this multithreaded
     fn update(&mut self) {
+        self.push_updates();
         for (_, agent) in self.lookup.iter_mut() {
             agent.update();
         }
     }
 
     /// TODO when we connect in remote managers, this should probably return a future iterator
-    fn filter<'a, P>(&'a self, predicate: &'a P) -> Box<Iterator<Item = AgentProxy> + 'a>
+    fn filter<'a, P>(&'a self, predicate: &'a P) -> Box<Iterator<Item = AgentProxy<A>> + 'a>
         where P: Fn(A::State) -> bool
     {
         let iter = self.lookup
             .iter()
             .filter(move |&(_, ref a)| predicate(a.state()))
-            .map(|(&id, _)| AgentProxy::Local(id));
+            .map(|(&id, ref a)| {
+                AgentProxy {
+                    path: AgentPath::Local(id),
+                    state: a.state(),
+                }
+            });
         Box::new(iter)
         // TODO remote lookup
     }
 
     /// TODO this should probably return a future as well
-    fn find<P>(&self, predicate: P) -> Option<&A>
+    fn find<P>(&self, predicate: P) -> Option<AgentProxy<A>>
         where P: Fn(A::State) -> bool
     {
-        self.lookup.values().find(move |&a| predicate(a.state()))
+        let res = self.lookup.iter().find(move |&(_, ref a)| predicate(a.state()));
+        match res {
+            Some((id, a)) => {
+                Some(AgentProxy {
+                    path: AgentPath::Local(*id),
+                    state: a.state(),
+                })
+            }
+            None => None,
+        }
         // TODO remote lookup
     }
 }
