@@ -13,6 +13,7 @@ pub struct MyState {
 
 #[derive(Debug)]
 pub struct MyAgent {
+    id: usize,
     state: MyState,
     updates: Vec<MyUpdate>,
 }
@@ -32,16 +33,20 @@ impl Agent for MyAgent {
     type State = MyState;
     type Update = MyUpdate;
     type World = MyWorld;
-    fn new(state: MyState) -> MyAgent {
+    fn new(state: MyState, id: usize) -> MyAgent {
         MyAgent {
+            id: id,
             state: state,
             updates: Vec::new(),
         }
     }
+    fn id(&self) -> usize {
+        self.id
+    }
     fn decide<M: Manager<Self>>(&self,
                                 world: &Self::World,
                                 manager: &M)
-                                -> Vec<(AgentProxy<Self>, Self::Update)> {
+                                -> Vec<(AgentPath, Self::Update)> {
         let mut updates = Vec::new();
         match self.state.name.as_ref() {
             "hello" => {
@@ -49,7 +54,7 @@ impl Agent for MyAgent {
                 match manager.find(|s| s.name == "goodbye") {
                     Some(a) => {
                         println!("other name: {:?}", a);
-                        updates.push((a, MyUpdate::ChangeHealth(12)));
+                        updates.push((a.path, MyUpdate::ChangeHealth(12)));
                     }
                     None => println!("not found"),
                 }

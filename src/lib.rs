@@ -47,7 +47,8 @@ pub trait Agent: Send + Sync + Sized {
     type State: State;
     type Update: Update;
     type World: World;
-    fn new(state: Self::State) -> Self;
+    fn new(state: Self::State, id: usize) -> Self;
+    fn id(&self) -> usize;
     // TODO we have to pass the world or the manager
     // to the agents during decide
     // ideally this is a clone of:
@@ -60,7 +61,7 @@ pub trait Agent: Send + Sync + Sized {
     fn decide<M: Manager<Self>>(&self,
                                 world: &Self::World,
                                 manager: &M)
-                                -> Vec<(AgentProxy<Self>, Self::Update)>;
+                                -> Vec<(AgentPath, Self::Update)>;
     fn state(&self) -> Self::State;
     fn set_state(&mut self, state: Self::State) -> ();
     fn updates(&self) -> &Vec<Self::Update>;
@@ -135,7 +136,7 @@ impl<A: Agent> Manager<A> for LocalManager<A> {
 
     /// Spawn a new agent in this manager.
     fn spawn(&mut self, state: A::State) -> usize {
-        let agent = A::new(state);
+        let agent = A::new(state, self.last_id);
         self.lookup.insert(self.last_id, agent);
         self.last_id += 1;
         self.last_id
@@ -166,8 +167,8 @@ impl<A: Agent> Manager<A> for LocalManager<A> {
             updates.extend(u);
         }
 
-        for (agent, update) in updates {
-            let mut entry = self.updates.entry(agent.path).or_insert(Vec::new());
+        for (path, update) in updates {
+            let mut entry = self.updates.entry(path).or_insert(Vec::new());
             entry.push(update);
         }
     }
@@ -198,6 +199,7 @@ impl<A: Agent> Manager<A> for LocalManager<A> {
         // TODO remote lookup
     }
 
+    // TODO problem with these is they may sample themselves
     fn sample(&self, n: usize) -> Vec<AgentProxy<A>> {
         let mut rng = thread_rng();
         let iter = self.lookup.iter().map(|(&id, ref a)| {
