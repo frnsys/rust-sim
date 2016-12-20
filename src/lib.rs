@@ -1,9 +1,11 @@
 #![feature(unboxed_closures)]
 #![feature(conservative_impl_trait)]
+extern crate rand;
 extern crate rustc_serialize;
 
 use std::fmt::Debug;
 use std::net::SocketAddr;
+use rand::{thread_rng, Rng, sample};
 use std::collections::hash_map::HashMap;
 use rustc_serialize::{Decodable, Encodable};
 
@@ -30,6 +32,12 @@ pub trait Manager<A: Agent>: Send + Sync {
         where P: Fn(A::State) -> bool;
     fn find<P>(&self, predicate: P) -> Option<AgentProxy<A>> where P: Fn(A::State) -> bool;
     fn get(&self, path: AgentPath) -> Option<AgentProxy<A>>;
+    fn sample(&self, n: usize) -> Vec<AgentProxy<A>>;
+    fn sample_by<'a, P>(&'a self,
+                        predicate: &'a P,
+                        n: usize)
+                        -> Box<Iterator<Item = AgentProxy<A>> + 'a>
+        where P: Fn(A::State) -> f64;
 }
 
 pub trait World: Decodable + Encodable + Debug + Send + Sync + Clone + PartialEq {}
@@ -188,6 +196,46 @@ impl<A: Agent> Manager<A> for LocalManager<A> {
             });
         Box::new(iter)
         // TODO remote lookup
+    }
+
+    fn sample(&self, n: usize) -> Vec<AgentProxy<A>> {
+        let mut rng = thread_rng();
+        let iter = self.lookup.iter().map(|(&id, ref a)| {
+            AgentProxy {
+                path: AgentPath::Local(id),
+                state: a.state(),
+            }
+        });
+        sample(&mut rng, iter, n)
+    }
+
+    fn sample_by<'a, P>(&'a self,
+                        predicate: &'a P,
+                        n: usize)
+                        -> Box<Iterator<Item = AgentProxy<A>> + 'a>
+        where P: Fn(A::State) -> f64
+    {
+        // hashmap iteration order is arbitrary
+        // so no need to shuffle?
+        let mut rng = rand::thread_rng();
+        let iter = self.lookup
+            .iter()
+            .filter(move |&(_, ref a)| {
+                let prob = predicate(a.state());
+                let roll: f64 = rng.gen();
+                roll <= prob
+            });
+
+        // TODO this doesn't work
+        // let iter = if n > 0 { iter.take(n) } else { iter };
+
+        let iter = iter.take(n).map(|(&id, ref a)| {
+            AgentProxy {
+                path: AgentPath::Local(id),
+                state: a.state(),
+            }
+        });
+        Box::new(iter)
     }
 
     /// TODO this should probably return a future as well
