@@ -1,7 +1,7 @@
 extern crate sim;
 extern crate rustc_serialize;
 
-use sim::{Agent, Manager, LocalManager, State};
+use sim::{Agent, Manager};
 
 // TODO may be possible to even do an enum of states? that's how you could represent different
 // agent types
@@ -17,11 +17,6 @@ pub struct MyAgent {
 }
 
 #[derive(RustcDecodable, RustcEncodable, Debug, PartialEq, Clone)]
-pub struct MyWorld {
-    weather: String,
-}
-
-#[derive(RustcDecodable, RustcEncodable, Debug, PartialEq, Clone)]
 pub enum MyUpdate {
     ChangeName(String),
     ChangeHealth(usize),
@@ -30,14 +25,13 @@ pub enum MyUpdate {
 impl Agent for MyAgent {
     type State = MyState;
     type Update = MyUpdate;
-    type World = MyWorld;
     fn new(state: MyState) -> MyAgent {
         MyAgent {
             state: state,
             updates: Vec::new(),
         }
     }
-    fn decide<M: Manager<Self>>(&self, world: &Self::World, manager: &M) -> () {}
+    fn decide<M: Manager<Self>>(&self, manager: &M) -> () {}
     fn state(&self) -> MyState {
         self.state.clone()
     }
@@ -73,11 +67,9 @@ fn main() {
         name: "hello".to_string(),
         health: 0,
     };
-    let world = MyWorld { weather: "sunny".to_string() };
-    let mut manager = LocalManager::<MyAgent>::new(world);
-    manager.spawn(state.clone());
-    manager.spawn(state.clone());
-    manager.decide();
-    manager.update();
-    println!("ok");
+    let mut agent = MyAgent::new(state);
+    let update = MyUpdate::ChangeHealth(10);
+    println!("{:?}", agent.state);
+    agent.state = agent.apply_update(agent.state(), update);
+    println!("{:?}", agent.state);
 }
