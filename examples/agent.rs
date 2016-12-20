@@ -17,6 +17,11 @@ pub struct MyAgent {
 }
 
 #[derive(RustcDecodable, RustcEncodable, Debug, PartialEq, Clone)]
+pub struct MyWorld {
+    weather: String,
+}
+
+#[derive(RustcDecodable, RustcEncodable, Debug, PartialEq, Clone)]
 pub enum MyUpdate {
     ChangeName(String),
     ChangeHealth(usize),
@@ -25,13 +30,14 @@ pub enum MyUpdate {
 impl Agent for MyAgent {
     type State = MyState;
     type Update = MyUpdate;
+    type World = MyWorld;
     fn new(state: MyState) -> MyAgent {
         MyAgent {
             state: state,
             updates: Vec::new(),
         }
     }
-    fn decide<M: Manager<Self>>(&self, manager: &M) -> () {}
+    fn decide<M: Manager<Self>>(&self, world: &Self::World, manager: &M) -> () {}
     fn state(&self) -> MyState {
         self.state.clone()
     }
