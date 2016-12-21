@@ -1,7 +1,8 @@
 extern crate sim;
 extern crate rustc_serialize;
 
-use sim::{Agent, Manager, LocalManager, State, AgentProxy, AgentPath};
+use std::sync::{Arc, RwLock};
+use sim::{Agent, Manager, LocalManager, State, AgentProxy, AgentPath, SharedPopulation};
 
 // TODO may be possible to even do an enum of states? that's how you could represent different
 // agent types
@@ -11,7 +12,7 @@ pub struct MyState {
     health: usize,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MyAgent {
     id: usize,
     state: MyState,
@@ -44,15 +45,16 @@ impl Agent for MyAgent {
         self.id
     }
     fn setup(&mut self, world: &Self::World) -> () {}
-    fn decide<M: Manager<Self>>(&self,
-                                world: &Self::World,
-                                manager: &M)
-                                -> Vec<(AgentPath, Self::Update)> {
+    fn decide(&self,
+              world: Self::World,
+              population: SharedPopulation<Self>)
+              -> Vec<(AgentPath, Self::Update)> {
         let mut updates = Vec::new();
         match self.state.name.as_ref() {
             "hello" => {
                 println!("my name is hello");
-                match manager.find(|s| s.name == "goodbye") {
+                let pop = population.read().unwrap();
+                match pop.find(|s| s.name == "goodbye") {
                     Some(a) => {
                         println!("other name: {:?}", a);
                         updates.push((a.path, MyUpdate::ChangeHealth(12)));
@@ -108,12 +110,18 @@ fn main() {
     };
     let world = MyWorld { weather: "sunny".to_string() };
     let mut manager = LocalManager::<MyAgent>::new(world);
-    manager.spawn(state.clone());
-    manager.spawn(state2.clone());
+    {
+        let mut pop = manager.population.write().unwrap();
+        pop.spawn(state.clone());
+        pop.spawn(state2.clone());
+    }
     manager.decide();
     manager.update();
-    let a = manager.get(AgentPath::Local(1)).unwrap();
-    println!("{:?}", a);
-    println!("ok");
-    assert_eq!(a.state.health, health + 12);
+    {
+        let pop = manager.population.read().unwrap();
+        let a = pop.get(AgentPath::Local(1)).unwrap();
+        println!("{:?}", a);
+        println!("ok");
+        assert_eq!(a.state.health, health + 12);
+    }
 }

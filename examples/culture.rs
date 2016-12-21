@@ -5,7 +5,7 @@ extern crate rustc_serialize;
 
 use time::PreciseTime;
 use rand::{thread_rng, Rng, sample};
-use sim::{Agent, Manager, LocalManager, AgentProxy, AgentPath};
+use sim::{Agent, Manager, LocalManager, AgentProxy, AgentPath, SharedPopulation};
 
 // TODO may be possible to even do an enum of states? that's how you could represent different
 // agent types
@@ -15,7 +15,7 @@ pub struct State {
     frugality: f64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Person {
     id: usize,
     state: State,
@@ -53,14 +53,15 @@ impl Agent for Person {
         self.id
     }
     fn setup(&mut self, world: &Self::World) -> () {}
-    fn decide<M: Manager<Self>>(&self,
-                                world: &Self::World,
-                                manager: &M)
-                                -> Vec<(AgentPath, Self::Update)> {
+    fn decide(&self,
+              world: Self::World,
+              population: SharedPopulation<Self>)
+              -> Vec<(AgentPath, Self::Update)> {
         let mut updates = Vec::new();
 
+        let pop = population.read().unwrap();
         for friend_path in self.friends.iter() {
-            let friend = match manager.get(friend_path.clone()) {
+            let friend = match pop.get(friend_path.clone()) {
                 Some(a) => a,
                 None => panic!("couldnt find friend: {:?}", friend_path),
             };
@@ -111,28 +112,34 @@ fn main() {
 
     let mut ids = Vec::new();
     let mut rng = thread_rng();
-    for i in 0..1000 {
-        let roll: f64 = rng.gen();
-        let s = if roll <= 0.5 {
-            state.clone()
-        } else {
-            state2.clone()
-        };
-        let id = manager.spawn(s);
-        ids.push(id);
+    {
+        let mut pop = manager.population.write().unwrap();
+        for i in 0..2000 {
+            let roll: f64 = rng.gen();
+            let s = if roll <= 0.5 {
+                state.clone()
+            } else {
+                state2.clone()
+            };
+            let id = pop.spawn(s);
+            ids.push(id);
+        }
     }
 
-    // assign friends
-    let n_friends = 10;
-    for id in ids.clone() {
-        match manager.lookup.get_mut(&id) {
-            Some(a) => {
-                let friends = sample(&mut rng, ids.clone(), n_friends);
-                for id in friends {
-                    a.friends.push(AgentPath::Local(id));
+    {
+        // assign friends
+        let n_friends = 10;
+        let mut pop = manager.population.write().unwrap();
+        for id in ids.clone() {
+            match pop.local.get_mut(&id) {
+                Some(a) => {
+                    let friends = sample(&mut rng, ids.clone(), n_friends);
+                    for id in friends {
+                        a.friends.push(AgentPath::Local(id));
+                    }
                 }
+                _ => (),
             }
-            _ => (),
         }
     }
 
@@ -148,9 +155,13 @@ fn main() {
         let end = PreciseTime::now();
         println!("step took: {}", start.to(end));
     }
-    let a = manager.get(AgentPath::Local(1)).unwrap();
-    println!("{:?}", a);
-    let a = manager.get(AgentPath::Local(0)).unwrap();
-    println!("{:?}", a);
-    println!("ok");
+
+    {
+        let pop = manager.population.read().unwrap();
+        let a = pop.get(AgentPath::Local(1)).unwrap();
+        println!("{:?}", a);
+        let a = pop.get(AgentPath::Local(0)).unwrap();
+        println!("{:?}", a);
+        println!("ok");
+    }
 }
