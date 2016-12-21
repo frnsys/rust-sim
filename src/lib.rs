@@ -1,10 +1,15 @@
 #![feature(unboxed_closures)]
 #![feature(conservative_impl_trait)]
 extern crate rand;
+extern crate futures;
+extern crate futures_cpupool;
 extern crate rustc_serialize;
 
 use std::fmt::Debug;
 use std::net::SocketAddr;
+use std::sync::{Arc, RwLock};
+use futures::{future, collect, Future};
+use futures_cpupool::{CpuPool, CpuFuture};
 use rand::{thread_rng, Rng, sample};
 use std::collections::hash_map::HashMap;
 use rustc_serialize::{Decodable, Encodable};
@@ -17,13 +22,14 @@ pub trait Update
 }
 impl<T> Update for T where T: Decodable + Encodable + Debug + Send + Sync + Clone + PartialEq {}
 
-pub trait Manager<A: Agent>: Send + Sync {
+pub trait Manager<A: Agent>: Send + Sync + 'static {
     fn new(world: A::World) -> Self;
     fn spawn(&mut self, state: A::State) -> usize;
     fn push_updates(&mut self) -> ();
     fn setup(&mut self) -> ();
-    fn decide(&mut self) -> ();
-    fn update(&mut self) -> ();
+    // fn decide(&mut self) -> ();
+    fn decide(&'static mut self) -> ();
+    fn update(&'static mut self) -> ();
     fn world(&self) -> A::World;
 
     // TODO for now this returns a Box, ideally we could just use `impl trait` but it doesn't work
@@ -45,7 +51,7 @@ pub trait Manager<A: Agent>: Send + Sync {
 pub trait World: Decodable + Encodable + Debug + Send + Sync + Clone {}
 impl<T> World for T where T: Decodable + Encodable + Debug + Send + Sync + Clone {}
 
-pub trait Agent: Send + Sync + Sized {
+pub trait Agent: Send + Sync + Sized + Clone {
     type State: State;
     type Update: Update;
     type World: World;
@@ -53,8 +59,8 @@ pub trait Agent: Send + Sync + Sized {
     fn id(&self) -> usize;
     fn setup(&mut self, world: &Self::World) -> ();
     fn decide<M: Manager<Self>>(&self,
-                                world: &Self::World,
-                                manager: &M)
+                                world: Self::World,
+                                manager: Arc<RwLock<&mut M>>)
                                 -> Vec<(AgentPath, Self::Update)>;
     fn state(&self) -> Self::State;
     fn set_state(&mut self, state: Self::State) -> ();
@@ -97,7 +103,7 @@ pub struct LocalManager<A: Agent> {
     world: A::World,
 }
 
-impl<A: Agent> Manager<A> for LocalManager<A> {
+impl<A: Agent + 'static> Manager<A> for LocalManager<A> {
     fn new(world: A::World) -> LocalManager<A> {
         LocalManager {
             lookup: HashMap::<usize, A>::new(),
@@ -160,27 +166,46 @@ impl<A: Agent> Manager<A> for LocalManager<A> {
     }
 
     /// Calls the `decide` method on all local agents.
-    /// TODO make this multithreaded
-    fn decide(&mut self) {
-        let mut updates = Vec::new();
-        for agent in self.lookup.values() {
-            let u = agent.decide(&self.world, self);
-            updates.extend(u);
+    fn decide(&'static mut self) {
+        let mut futs = Vec::new();
+        let pool = CpuPool::new_num_cpus();
+        let world = self.world.clone();
+        let agents: Vec<A> = self.lookup.values().cloned().collect();
+        let mgmt = Arc::new(RwLock::new(self));
+        for agent in agents {
+            let mgmt = mgmt.clone();
+            let agent = agent.clone();
+            let world = world.clone();
+            let f: CpuFuture<Vec<(AgentPath, A::Update)>, ()> =
+                pool.spawn(future::lazy(move || future::finished(agent.decide(world, mgmt))));
+            futs.push(f);
         }
 
-        for (path, update) in updates {
-            let mut entry = self.updates.entry(path).or_insert(Vec::new());
-            entry.push(update);
+        let f = collect(futs);
+        let updates_list = f.wait().unwrap();
+        let mut self_w = mgmt.write().unwrap();
+        for updates in updates_list {
+            for (path, update) in updates {
+                let mut entry = self_w.updates.entry(path).or_insert(Vec::new());
+                entry.push(update);
+            }
         }
     }
 
     /// Calls the `update` method on all local agents.
-    /// TODO make this multithreaded
-    fn update(&mut self) {
+    fn update(&'static mut self) {
         self.push_updates();
+
+        let mut futs = Vec::new();
+        let pool = CpuPool::new_num_cpus();
         for (_, agent) in self.lookup.iter_mut() {
-            agent.update();
+            let f: CpuFuture<(), ()> =
+                pool.spawn(future::lazy(move || future::finished(agent.update())));
+            futs.push(f);
         }
+
+        let f = collect(futs);
+        f.wait().unwrap();
     }
 
     /// TODO when we connect in remote managers, this should probably return a future iterator

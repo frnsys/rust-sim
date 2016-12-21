@@ -1,6 +1,7 @@
 extern crate sim;
 extern crate rustc_serialize;
 
+use std::sync::{Arc, RwLock};
 use sim::{Agent, Manager, LocalManager, State, AgentProxy, AgentPath};
 
 // TODO may be possible to even do an enum of states? that's how you could represent different
@@ -11,7 +12,7 @@ pub struct MyState {
     health: usize,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MyAgent {
     id: usize,
     state: MyState,
@@ -45,14 +46,15 @@ impl Agent for MyAgent {
     }
     fn setup(&mut self, world: &Self::World) -> () {}
     fn decide<M: Manager<Self>>(&self,
-                                world: &Self::World,
-                                manager: &M)
+                                world: Self::World,
+                                manager: Arc<RwLock<&mut M>>)
                                 -> Vec<(AgentPath, Self::Update)> {
         let mut updates = Vec::new();
         match self.state.name.as_ref() {
             "hello" => {
                 println!("my name is hello");
-                match manager.find(|s| s.name == "goodbye") {
+                let mgr = manager.read().unwrap();
+                match mgr.find(|s| s.name == "goodbye") {
                     Some(a) => {
                         println!("other name: {:?}", a);
                         updates.push((a.path, MyUpdate::ChangeHealth(12)));

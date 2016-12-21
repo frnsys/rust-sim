@@ -5,6 +5,8 @@ authors = ["Francis Tseng <f+accounts@frnsys.com>"]
 
 [dependencies]
 rand = "*"
+futures = "*"
+futures-cpupool = "*"
 rustc-serialize = "*"
 
 [dev-dependencies]
