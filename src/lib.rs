@@ -3,7 +3,14 @@
 extern crate rand;
 extern crate futures;
 extern crate futures_cpupool;
+extern crate tokio_core;
+extern crate tokio_proto;
+extern crate tokio_service;
+extern crate rmp_serialize;
 extern crate rustc_serialize;
+
+mod proto;
+mod router;
 
 use std::fmt::Debug;
 use std::net::SocketAddr;
