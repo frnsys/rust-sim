@@ -20,6 +20,8 @@ use futures_cpupool::{CpuPool, CpuFuture};
 use rand::{thread_rng, Rng, sample};
 use std::collections::hash_map::HashMap;
 use rustc_serialize::{Decodable, Encodable};
+use proto::Message;
+use router::Client;
 
 pub trait State: Decodable + Encodable + Debug + Send + Sync + Clone + PartialEq {}
 impl<T> State for T where T: Decodable + Encodable + Debug + Send + Sync + Clone + PartialEq {}
@@ -67,29 +69,59 @@ pub trait Agent: Send + Sync + Sized + Clone {
     }
 }
 
-#[derive(PartialEq, Eq, Hash, Debug, Clone)]
+#[derive(RustcDecodable, RustcEncodable, PartialEq, Eq, Hash, Debug, Clone)]
 pub enum AgentPath {
     Local(usize),
-    Remote(usize, SocketAddr),
+    // Remote(usize, SocketAddr), TODO -> RemoteAddr?
+    Remote(usize, String),
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(RustcDecodable, RustcEncodable, Debug, PartialEq, Clone)]
 pub struct AgentProxy<A: Agent> {
     pub path: AgentPath,
     pub state: A::State,
+}
+
+#[derive(RustcDecodable, RustcEncodable, Debug, PartialEq)]
+pub enum PopulationReq<A: Agent, M: Message> {
+    Spawn(A::State),
+    Get(AgentPath),
+    Sample(usize),
+    Call(M),
+}
+
+#[derive(RustcDecodable, RustcEncodable, Debug, PartialEq)]
+pub enum PopulationRes<A: Agent> {
+    Err(String),
+    Agent(AgentProxy<A>),
+    Agents(Vec<AgentProxy<A>>),
 }
 
 #[derive(Debug, Clone)]
 pub struct Population<A: Agent> {
     last_id: usize,
     pub local: HashMap<usize, A>,
+    remote: HashMap<String, Client>,
 }
+
+// ok so maybe only the commander/arbiter node
+// needs to reference multiple populations
+// a population itself doesn't need to do that!
+// so we have local populations and remote populations,
+// the latter of which are essentially clients
+// eh actually i dont think that'd work, b/c each local node may need to access the full population
+//
+// the ROUTER/SERVER and CLIENT should be separated. the router only needs to live on the manager,
+// and the population should be managed by it (e.g. Router->Population rather than
+// Population->Router)
+// the population however needs clients to connect to other populations
 
 impl<A: Agent> Population<A> {
     pub fn new() -> Population<A> {
         Population {
             last_id: 0,
             local: HashMap::<usize, A>::new(),
+            remote: HashMap::<String, Client>::new(),
         }
     }
 
@@ -97,7 +129,30 @@ impl<A: Agent> Population<A> {
         let agent = A::new(state, self.last_id);
         self.local.insert(self.last_id, agent);
         self.last_id += 1;
-        self.last_id - 1
+        self.last_id - 1 // TODO this should return the path or proxy
+    }
+
+    // fn select(&self, M:
+
+    fn call_remote(&self, addr: String, req: PopulationReq) -> PopulationRes {
+        // TODO
+    }
+
+    pub fn get_remote(&self, addr: String, path: AgentPath) -> Option<AgentProxy<A>> {
+        let res = self.call_remote(addr, PopulationReq::Get(path));
+        match res {
+            PopulationRes::Agent(proxy) => Some(proxy),
+            _ => None,
+        }
+    }
+
+    pub fn spawn_remote(&self, state: A::State) -> Option<AgentProxy<A>> {
+        let res = self.call_remote(PopulationReq::Spawn(state));
+        match res {
+            PopulationRes::Agent(proxy) => Some(proxy),
+            _ => None,
+        }
+        // TODO
     }
 
     pub fn get(&self, path: AgentPath) -> Option<AgentProxy<A>> {

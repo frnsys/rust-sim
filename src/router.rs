@@ -52,9 +52,20 @@ impl Router {
             let _ = core.run(done);
         })
     }
+}
+
+
+#[derive(Debug, Clone)]
+pub struct Client {
+    addr: SocketAddr,
+}
+
+impl Client {
+    pub fn new(addr: String) -> Client {
+        Client { addr: addr.parse().unwrap() }
+    }
 
     fn request<Req: Message + 'static, Res: Message + 'static>(&self,
-                                                               addr: SocketAddr,
                                                                req: Req)
                                                                -> Result<Res, Error> {
         let mut core = Core::new().unwrap();
