@@ -56,6 +56,7 @@ impl<S: State> Population<S> {
 }
 
 impl<S: State> Population<S> {
+    /// Create a new agent with the specified state, returning the new agent's id.
     fn spawn(&self, state: S) -> Uuid {
         let id = Uuid::new_v4();
         set_agent(id, state, &self.conn);
@@ -64,10 +65,12 @@ impl<S: State> Population<S> {
         id
     }
 
+    /// Get an agent by id.
     fn get(&self, id: Uuid) -> Option<Agent<S>> {
         get_agent(id, &self.conn)
     }
 
+    /// Deletes an agent by id.
     fn kill(&self, id: Uuid) {
         let _: () = self.conn.del(id.to_string()).unwrap();
         let _: () = self.conn.srem("population", id.to_string()).unwrap();
