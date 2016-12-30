@@ -1,6 +1,5 @@
 use uuid::Uuid;
 use std::fmt::Debug;
-use population::Population;
 use rustc_serialize::{Decodable, Encodable};
 
 pub trait State: Decodable + Encodable + Debug + Send + Sync + Clone + PartialEq {}
@@ -38,4 +37,15 @@ pub trait Simulation: Send + Sync + Clone {
         }
         state
     }
+}
+
+pub trait Population<S: State> {
+    fn spawn(&mut self, state: S) -> Uuid;
+    fn get(&self, id: Uuid) -> Option<Agent<S>>;
+    fn kill(&mut self, id: Uuid) -> ();
+}
+
+pub trait Manager<S: Simulation>: 'static {
+    fn decide(&mut self) -> ();
+    fn update(&mut self) -> ();
 }

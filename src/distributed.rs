@@ -6,9 +6,7 @@ use rmp_serialize::{Encoder, Decoder};
 use rustc_serialize::{Encodable, Decodable};
 use redis::{Commands, Connection, ConnectionLike, Client, PipelineCommands, pipe};
 use std::marker::PhantomData;
-use simulation::{Agent, State, Simulation};
-use population::Population;
-use manager::Manager;
+use simulation::{Agent, State, Simulation, Population, Manager};
 
 fn decode<R: Decodable>(inp: String) -> Result<R, Error> {
     let mut decoder = Decoder::new(inp.as_bytes());

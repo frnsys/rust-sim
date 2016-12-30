@@ -3,13 +3,7 @@ use std::sync::{Arc, RwLock};
 use std::collections::HashMap;
 use futures::{future, collect, Future};
 use futures_cpupool::{CpuPool, CpuFuture};
-use population::SharedPopulation;
-use simulation::Simulation;
-
-pub trait Manager<S: Simulation>: 'static {
-    fn decide(&mut self) -> ();
-    fn update(&mut self) -> ();
-}
+use simulation::{Simulation, Agent, Population, Manager, State};
 
 pub struct LocalManager<S: Simulation> {
     updates: HashMap<Uuid, Vec<S::Update>>,
@@ -71,5 +65,80 @@ impl<S: Simulation> Manager<S> {
             simulation: simulation,
             world: world,
         }
+    }
+}
+
+
+pub struct LocalPopulation<S: State> {
+    pub agents: HashMap<Uuid, Agent<S>>,
+}
+
+impl<S: State> LocalPopulation<S> {
+    pub fn new() -> LocalPopulation<S> {
+        LocalPopulation { agents: HashMap::<Uuid, Agent<S>>::new() }
+    }
+}
+
+impl<S: State> Population<S> for LocalPopulation<S> {
+    fn spawn(&mut self, state: S) -> Uuid {
+        let id = Uuid::new_v4();
+        let agent = Agent {
+            state: state,
+            id: id.clone(),
+        };
+        self.agents.insert(agent.id, agent);
+        id
+    }
+
+    fn get(&self, id: Uuid) -> Option<Agent<S>> {
+        match self.agents.get(&id) {
+            Some(a) => {
+                Some(Agent {
+                    id: a.id,
+                    state: a.state.clone(),
+                })
+            }
+            None => None,
+        }
+    }
+
+    fn kill(&mut self, id: Uuid) -> () {
+        self.agents.remove(&id);
+    }
+}
+
+#[derive(Clone)]
+pub struct SharedPopulation<S: State> {
+    pub population: Arc<RwLock<LocalPopulation<S>>>,
+}
+
+impl<S: State> SharedPopulation<S> {
+    pub fn new() -> SharedPopulation<S> {
+        SharedPopulation { population: Arc::new(RwLock::new(LocalPopulation::new())) }
+    }
+}
+
+impl<S: State> Population<S> for SharedPopulation<S> {
+    fn spawn(&mut self, state: S) -> Uuid {
+        let mut pop = self.population.write().unwrap();
+        pop.spawn(state)
+    }
+
+    fn get(&self, id: Uuid) -> Option<Agent<S>> {
+        let pop = self.population.read().unwrap();
+        match pop.agents.get(&id) {
+            Some(a) => {
+                Some(Agent {
+                    id: a.id,
+                    state: a.state.clone(),
+                })
+            }
+            None => None,
+        }
+    }
+
+    fn kill(&mut self, id: Uuid) -> () {
+        let mut pop = self.population.write().unwrap();
+        pop.kill(id);
     }
 }
