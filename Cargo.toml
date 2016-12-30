@@ -4,11 +4,14 @@ version = "0.1.0"
 authors = ["Francis Tseng <f+accounts@frnsys.com>"]
 
 [dependencies]
-rand = "*"
 futures = "*"
 futures-cpupool = "*"
 rustc-serialize = "*"
-redis = "*"
+rmp = "*"
+rmp-serialize = "*"
+redis = "0.5.2"
+uuid = { version = "0.2", features = ["v4", "rustc-serialize"] }
+oppgave = "0.1.0"
 
 [dev-dependencies]
 time = "*"
