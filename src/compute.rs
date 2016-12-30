@@ -1,6 +1,5 @@
 use std::io;
 use std::ops::Deref;
-use std::marker::PhantomData;
 use rmp_serialize::decode::Error;
 use rmp_serialize::{Encoder, Decoder};
 use rustc_serialize::{Encodable, Decodable};
@@ -36,17 +35,17 @@ fn set_agent<S: State>(id: Uuid, state: S, conn: &Connection) {
 }
 
 /// An interface to the agent population.
-pub struct Population<S: State> {
+pub struct Population<S: Simulation> {
     conn: Connection,
-    state: PhantomData<S>,
+    simulation: S,
 }
 
-impl<S: State> Population<S> {
-    pub fn new(addr: &str) -> Population<S> {
+impl<S: Simulation> Population<S> {
+    pub fn new(addr: &str, simulation: S) -> Population<S> {
         let client = Client::open(addr).unwrap();
         Population {
             conn: client.get_connection().unwrap(),
-            state: PhantomData,
+            simulation: simulation,
         }
     }
 
@@ -55,16 +54,21 @@ impl<S: State> Population<S> {
     }
 
     /// Create a new agent with the specified state, returning the new agent's id.
-    pub fn spawn(&self, state: S) -> Uuid {
+    pub fn spawn(&self, state: S::State) -> Uuid {
         let id = Uuid::new_v4();
-        set_agent(id, state, &self.conn);
+        set_agent(id, state.clone(), &self.conn);
         let _: () = self.conn.sadd("population", id.to_string()).unwrap();
         let _: () = self.conn.sadd("to_update", id.to_string()).unwrap();
+        self.simulation.setup(Agent {
+                                  id: id,
+                                  state: state.clone(),
+                              },
+                              &self);
         id
     }
 
     /// Get an agent by id.
-    pub fn get(&self, id: Uuid) -> Option<Agent<S>> {
+    pub fn get(&self, id: Uuid) -> Option<Agent<S::State>> {
         get_agent(id, &self.conn)
     }
 
@@ -73,29 +77,74 @@ impl<S: State> Population<S> {
         let _: () = self.conn.del(id.to_string()).unwrap();
         let _: () = self.conn.srem("population", id.to_string()).unwrap();
     }
+
+    /// Lookup agents at a particular index.
+    pub fn lookup(&self, index: &str) -> Vec<Agent<S::State>> {
+        let ids: Vec<String> = self.conn.smembers(format!("idx:{}", index)).unwrap();
+        match ids.len() {
+            0 => Vec::new(),
+            1 => {
+                let id = ids[0].as_ref();
+                let state_data: Vec<u8> = self.conn.get(id).unwrap();
+                let agent = Agent {
+                    id: Uuid::parse_str(id).unwrap(),
+                    state: decode(state_data).unwrap(),
+                };
+                vec![agent]
+            }
+            _ => {
+                let states_data: Vec<Vec<u8>> = self.conn.get(ids.clone()).unwrap();
+                ids.iter()
+                    .zip(states_data)
+                    .map(|(id, state_data)| {
+                        Agent {
+                            id: Uuid::parse_str(id).unwrap(),
+                            state: decode(state_data).unwrap(),
+                        }
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    /// Add an agent (id) to an index.
+    pub fn index(&self, index: &str, agent: &Agent<S::State>) {
+        let _: () = self.conn.sadd(format!("idx:{}", index), agent.id.to_string()).unwrap();
+    }
+
+    /// Reset indices.
+    pub fn reset_indices(&self) {
+        let keys: Vec<String> = self.conn.keys("idx:*").unwrap();
+        let _: () = self.conn.del(keys).unwrap();
+    }
 }
 
 pub struct Manager<S: Simulation> {
     conn: Connection,
-    pub population: Population<S::State>,
+    pub population: Population<S>,
 }
 
 impl<S: Simulation> Manager<S> {
-    pub fn new(addr: &str, world: S::World) -> Manager<S> {
+    pub fn new(addr: &str, simulation: S, world: S::World) -> Manager<S> {
         let client = Client::open(addr).unwrap();
         let conn = client.get_connection().unwrap();
 
         let data = encode(&world).unwrap();
         let _: () = conn.set("world", data).unwrap();
 
-        // Reset sets
+        // reset sets
+        let _: () = conn.del("workers").unwrap();
+        let _: () = conn.del("finished").unwrap();
         let _: () = conn.del("population").unwrap();
         let _: () = conn.del("to_decide").unwrap();
         let _: () = conn.del("to_update").unwrap();
 
+        // start with "idle" phase
+        let _: () = conn.set("current_phase", "idle").unwrap();
+
         Manager {
             conn: conn,
-            population: Population::new(addr),
+            population: Population::new(addr, simulation),
         }
     }
 
@@ -105,45 +154,97 @@ impl<S: Simulation> Manager<S> {
     }
 
     pub fn start(&self, n_steps: usize) -> () {
-        // TODO this won't quite work with how things are currently
-        // for i in 0..n_steps {
-        // }
+        let mut steps = 0;
 
-        // Just copy population to the "to_decide" set
+        if self.n_workers() == 0 {
+            println!("Waiting for at least one worker...");
+            while self.n_workers() == 0 {
+            }
+        }
+
+        // copy population to the "to_decide" set
         let _: () = self.conn.sunionstore("to_decide", "population").unwrap();
+
+        while steps < n_steps {
+            let _: () = self.conn.publish("command", "decide").unwrap();
+            let _: () = self.conn.set("current_phase", "decide").unwrap();
+            self.wait_until_finished();
+            let _: () = self.conn.publish("command", "update").unwrap();
+            let _: () = self.conn.set("current_phase", "update").unwrap();
+            self.wait_until_finished();
+            steps += 1;
+        }
+
+        let _: () = self.conn.publish("command", "terminate").unwrap();
+    }
+
+    fn wait_until_finished(&self) {
+        while self.conn.scard::<&str, usize>("finished").unwrap() != self.n_workers() {
+        }
+    }
+
+    pub fn n_workers(&self) -> usize {
+        self.conn.scard::<&str, usize>("workers").unwrap()
     }
 }
 
 pub struct Worker<S: Simulation> {
+    id: Uuid,
     addr: String,
-    population: Population<S::State>,
+    population: Population<S>,
+    simulation: S,
 }
 
 impl<S: Simulation> Worker<S> {
-    pub fn new(addr: &str) -> Worker<S> {
+    pub fn new(addr: &str, simulation: S) -> Worker<S> {
         Worker {
+            id: Uuid::new_v4(),
             addr: addr.to_owned(),
-            population: Population::new(addr),
+            population: Population::new(addr, simulation.clone()),
+            simulation: simulation,
         }
     }
 
-    pub fn start(&self, simulation: S) {
+    pub fn start(&self) {
         let client = Client::open(self.addr.deref()).unwrap();
         let conn = client.get_connection().unwrap();
+
+        // register with the manager
+        let _: () = conn.sadd("workers", self.id.to_string()).unwrap();
+
+        // subscribe to the command channel
+        let mut pubsub = client.get_pubsub().unwrap();
+        pubsub.subscribe("command").unwrap();
+
+        // check what the current phase is
+        let phase: String = client.get("current_phase").unwrap();
+        self.process_cmd(phase.as_ref(), &conn);
+
         loop {
-            self.decide(&simulation, &conn);
-
-            // check that all agents are ready to update
-            while conn.scard::<&str, usize>("to_update").unwrap() !=
-                  conn.scard::<&str, usize>("population").unwrap() {
+            let msg = pubsub.get_message().unwrap();
+            let payload: String = msg.get_payload().unwrap();
+            self.process_cmd(payload.as_ref(), &conn);
+            if payload == "terminate" {
+                break;
             }
+        }
+    }
 
-            self.update(&simulation, &conn);
-
-            // check that all agents are ready to decide
-            while conn.scard::<&str, usize>("to_decide").unwrap() !=
-                  conn.scard::<&str, usize>("population").unwrap() {
+    fn process_cmd(&self, cmd: &str, conn: &Connection) {
+        match cmd {
+            "terminate" => {
+                let _: () = conn.srem("workers", self.id.to_string()).unwrap();
             }
+            "decide" => {
+                self.decide(&self.simulation, &conn);
+                let _: () = conn.sadd("finished", self.id.to_string()).unwrap();
+            }
+            "update" => {
+                self.update(&self.simulation, &conn);
+                let _: () = conn.sadd("finished", self.id.to_string()).unwrap();
+            }
+            "idle" => (),
+            s => println!("Unrecognized command: {}", s),
         }
     }
 
@@ -174,11 +275,14 @@ impl<S: Simulation> Worker<S> {
     fn update(&self, simulation: &S, conn: &Connection) {
         while let Ok(id) = conn.spop::<&str, String>("to_update") {
             let updates: Vec<S::Update> = {
-                let updates_data: Vec<u8> = conn.lrange(format!("updates:{}", id), 0, -1).unwrap();
+                let key = format!("updates:{}", id);
+                let updates_data: Vec<Vec<u8>> = conn.lrange(&key, 0, -1)
+                    .unwrap();
+                let _: () = conn.del(&key).unwrap();
                 if updates_data.len() == 0 {
                     Vec::new()
                 } else {
-                    decode(updates_data).unwrap()
+                    updates_data.iter().map(|data| decode(data.clone()).unwrap()).collect()
                 }
             };
             let id = Uuid::parse_str(&id).unwrap();
