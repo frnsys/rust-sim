@@ -5,7 +5,8 @@ extern crate futures_cpupool;
 extern crate rustc_serialize;
 extern crate rmp_serialize;
 
-mod simulation;
-mod distributed;
+mod sim;
+mod compute;
 
-pub use simulation::{Update, State, Simulation};
+pub use sim::{Update, State, Simulation};
+pub use compute::{Population, Manager, Worker};

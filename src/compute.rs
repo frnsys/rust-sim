@@ -1,12 +1,12 @@
 use std::io;
 use std::ops::Deref;
-use uuid::Uuid;
+use std::marker::PhantomData;
 use rmp_serialize::decode::Error;
 use rmp_serialize::{Encoder, Decoder};
 use rustc_serialize::{Encodable, Decodable};
-use redis::{Commands, Connection, ConnectionLike, Client, PipelineCommands, pipe};
-use std::marker::PhantomData;
-use simulation::{Agent, State, Simulation, Population, Manager};
+use sim::{Agent, State, Simulation};
+use redis::{Commands, Connection, Client, PipelineCommands, pipe};
+use uuid::Uuid;
 
 fn decode<R: Decodable>(inp: String) -> Result<R, Error> {
     let mut decoder = Decoder::new(inp.as_bytes());
@@ -40,23 +40,23 @@ fn set_agent<S: State>(id: Uuid, state: S, conn: &Connection) {
     let _: () = conn.set(id.to_string(), data).unwrap();
 }
 
-pub struct DistPopulation<S: State> {
+pub struct Population<S: State> {
     conn: Connection,
     state: PhantomData<S>,
 }
 
-impl<S: State> DistPopulation<S> {
-    pub fn new(addr: &str) -> DistPopulation<S> {
+impl<S: State> Population<S> {
+    pub fn new(addr: &str) -> Population<S> {
         let client = Client::open(addr).unwrap();
-        DistPopulation {
+        Population {
             conn: client.get_connection().unwrap(),
             state: PhantomData,
         }
     }
 }
 
-impl<S: State> Population<S> for DistPopulation<S> {
-    fn spawn(&mut self, state: S) -> Uuid {
+impl<S: State> Population<S> {
+    fn spawn(&self, state: S) -> Uuid {
         let id = Uuid::new_v4();
         set_agent(id, state, &self.conn);
         let _: () = self.conn.sadd("population", id.to_string()).unwrap();
@@ -68,39 +68,39 @@ impl<S: State> Population<S> for DistPopulation<S> {
         get_agent(id, &self.conn)
     }
 
-    fn kill(&mut self, id: Uuid) {
+    fn kill(&self, id: Uuid) {
         let _: () = self.conn.del(id.to_string()).unwrap();
         let _: () = self.conn.srem("population", id.to_string()).unwrap();
     }
 }
 
-pub struct DistManager<S: Simulation> {
+pub struct Manager<S: Simulation> {
     conn: Connection,
-    pub population: DistPopulation<S::State>,
+    pub population: Population<S::State>,
 }
 
-impl<S: Simulation + 'static> Manager<S> for DistManager<S> {
-    fn decide(&mut self) -> () {
+impl<S: Simulation> Manager<S> {
+    fn decide(&self) -> () {
         // TODO create tasks for each agent
         // actually...in the current implementation this doesn't really have to do anything?
     }
-    fn update(&mut self) -> () {
+    fn update(&self) -> () {
         // TODO create tasks for each agent
         // actually...in the current implementation this doesn't really have to do anything?
     }
 }
 
-impl<S: Simulation> DistManager<S> {
-    pub fn new(addr: &str, world: S::World) -> DistManager<S> {
+impl<S: Simulation> Manager<S> {
+    pub fn new(addr: &str, world: S::World) -> Manager<S> {
         let client = Client::open(addr).unwrap();
         let conn = client.get_connection().unwrap();
 
         let data = encode(&world).unwrap();
         let _: () = conn.set("world", data).unwrap();
 
-        DistManager {
+        Manager {
             conn: conn,
-            population: DistPopulation::new(addr),
+            population: Population::new(addr),
         }
     }
 
@@ -110,16 +110,16 @@ impl<S: Simulation> DistManager<S> {
     }
 }
 
-pub struct DistWorker<S: Simulation> {
+pub struct Worker<S: Simulation> {
     addr: String,
-    population: DistPopulation<S::State>,
+    population: Population<S::State>,
 }
 
-impl<S: Simulation> DistWorker<S> {
-    pub fn new(addr: &str) -> DistWorker<S> {
-        DistWorker {
+impl<S: Simulation> Worker<S> {
+    pub fn new(addr: &str) -> Worker<S> {
+        Worker {
             addr: addr.to_owned(),
-            population: DistPopulation::new(addr),
+            population: Population::new(addr),
         }
     }
 
