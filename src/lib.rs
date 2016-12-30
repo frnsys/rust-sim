@@ -8,5 +8,6 @@ extern crate rmp_serialize;
 mod sim;
 mod compute;
 
-pub use sim::{Update, State, Simulation};
+pub use uuid::Uuid;
+pub use sim::{Agent, Update, State, Simulation};
 pub use compute::{Population, Manager, Worker};

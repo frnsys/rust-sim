@@ -8,20 +8,15 @@ use sim::{Agent, State, Simulation};
 use redis::{Commands, Connection, Client, PipelineCommands, pipe};
 use uuid::Uuid;
 
-fn decode<R: Decodable>(inp: String) -> Result<R, Error> {
-    let mut decoder = Decoder::new(inp.as_bytes());
+fn decode<R: Decodable>(inp: Vec<u8>) -> Result<R, Error> {
+    let mut decoder = Decoder::new(&inp[..]);
     Decodable::decode(&mut decoder)
 }
 
-fn encode<R: Encodable>(data: R) -> Result<String, io::Error> {
+fn encode<R: Encodable>(data: R) -> Result<Vec<u8>, io::Error> {
     let mut buf = Vec::<u8>::new();
     match data.encode(&mut Encoder::new(&mut buf)) {
-        Ok(_) => {
-            match String::from_utf8(buf) {
-                Ok(v) => Ok(v),
-                Err(e) => Err(io::Error::new(io::ErrorKind::Other, format!("{}", e))),
-            }
-        }
+        Ok(_) => Ok(buf),
         Err(e) => Err(io::Error::new(io::ErrorKind::Other, format!("{}", e))),
     }
 }
@@ -57,7 +52,7 @@ impl<S: State> Population<S> {
 
 impl<S: State> Population<S> {
     /// Create a new agent with the specified state, returning the new agent's id.
-    fn spawn(&self, state: S) -> Uuid {
+    pub fn spawn(&self, state: S) -> Uuid {
         let id = Uuid::new_v4();
         set_agent(id, state, &self.conn);
         let _: () = self.conn.sadd("population", id.to_string()).unwrap();
@@ -66,12 +61,12 @@ impl<S: State> Population<S> {
     }
 
     /// Get an agent by id.
-    fn get(&self, id: Uuid) -> Option<Agent<S>> {
+    pub fn get(&self, id: Uuid) -> Option<Agent<S>> {
         get_agent(id, &self.conn)
     }
 
     /// Deletes an agent by id.
-    fn kill(&self, id: Uuid) {
+    pub fn kill(&self, id: Uuid) {
         let _: () = self.conn.del(id.to_string()).unwrap();
         let _: () = self.conn.srem("population", id.to_string()).unwrap();
     }
@@ -159,9 +154,9 @@ impl<S: Simulation> Worker<S> {
                     let mut rpipe = pipe();
                     for (id, update) in updates {
                         let data = encode(&update).unwrap();
-                        let rpipe = rpipe.lpush(format!("updates:{}", id), data);
+                        rpipe.lpush(format!("updates:{}", id), data).ignore();
                     }
-                    let rpipe = rpipe.sadd("to_update", id.to_string());
+                    rpipe.sadd("to_update", id.to_string()).ignore();
                     let _: () = rpipe.query(conn).unwrap();
                 }
                 None => (),

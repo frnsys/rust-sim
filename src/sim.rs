@@ -24,7 +24,7 @@ pub struct Agent<S: State> {
 ///    updates themselves are _not_ applied in this phase.
 /// 2. `update`: this is a phase where agents consider queued updates and compute a new state
 ///    accordingly.
-pub trait Simulation: Send + Sync + Clone {
+pub trait Simulation {
     type State: State;
     type World: State;
     type Update: Update;
