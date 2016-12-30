@@ -7,6 +7,7 @@ use simulation::{Agent, State};
 pub trait Population<S: State> {
     fn spawn(&mut self, state: S) -> Uuid;
     fn get(&self, id: Uuid) -> Option<Agent<S>>;
+    fn kill(&mut self, id: Uuid) -> ();
 }
 
 pub struct LocalPopulation<S: State> {
@@ -41,6 +42,10 @@ impl<S: State> Population<S> for LocalPopulation<S> {
             None => None,
         }
     }
+
+    fn kill(&mut self, id: Uuid) -> () {
+        self.agents.remove(&id);
+    }
 }
 
 #[derive(Clone)]
@@ -71,5 +76,10 @@ impl<S: State> Population<S> for SharedPopulation<S> {
             }
             None => None,
         }
+    }
+
+    fn kill(&mut self, id: Uuid) -> () {
+        let mut pop = self.population.write().unwrap();
+        pop.kill(id);
     }
 }

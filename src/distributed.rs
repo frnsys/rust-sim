@@ -1,16 +1,14 @@
-use redis;
 use std::io;
 use std::ops::Deref;
-use redis::Commands;
 use uuid::Uuid;
 use rmp_serialize::decode::Error;
 use rmp_serialize::{Encoder, Decoder};
 use rustc_serialize::{Encodable, Decodable};
+use redis::{Commands, Connection, ConnectionLike, Client, PipelineCommands, pipe};
 use std::marker::PhantomData;
 use simulation::{Agent, State, Simulation};
 use population::Population;
 use manager::Manager;
-use oppgave::Queue;
 
 fn decode<R: Decodable>(inp: String) -> Result<R, Error> {
     let mut decoder = Decoder::new(inp.as_bytes());
@@ -30,14 +28,28 @@ fn encode<R: Encodable>(data: R) -> Result<String, io::Error> {
     }
 }
 
+fn get_agent<S: State>(id: Uuid, conn: &Connection) -> Option<Agent<S>> {
+    let data = conn.get(id.to_string()).unwrap();
+    Some(Agent {
+        id: id,
+        state: decode(data).unwrap(),
+    })
+}
+
+fn set_agent<S: State>(id: Uuid, state: S, conn: &Connection) {
+    // let data = json::encode(&state).unwrap();
+    let data = encode(&state).unwrap();
+    let _: () = conn.set(id.to_string(), data).unwrap();
+}
+
 pub struct DistPopulation<S: State> {
-    conn: redis::Connection,
+    conn: Connection,
     state: PhantomData<S>,
 }
 
 impl<S: State> DistPopulation<S> {
     pub fn new(addr: &str) -> DistPopulation<S> {
-        let client = redis::Client::open(addr).unwrap();
+        let client = Client::open(addr).unwrap();
         DistPopulation {
             conn: client.get_connection().unwrap(),
             state: PhantomData,
@@ -48,52 +60,56 @@ impl<S: State> DistPopulation<S> {
 impl<S: State> Population<S> for DistPopulation<S> {
     fn spawn(&mut self, state: S) -> Uuid {
         let id = Uuid::new_v4();
-        // let data = json::encode(&state).unwrap();
-        let data = encode(&state).unwrap();
-
-        // Add agent-state to redis
-        let _: () = self.conn.set(id.to_string(), data).unwrap();
+        set_agent(id, state, &self.conn);
+        let _: () = self.conn.sadd("population", id.to_string()).unwrap();
+        let _: () = self.conn.sadd("to_update", id.to_string()).unwrap();
         id
     }
 
     fn get(&self, id: Uuid) -> Option<Agent<S>> {
-        let data = self.conn.get(id.to_string()).unwrap();
-        Some(Agent {
-            id: id,
-            state: decode(data).unwrap(),
-        })
+        get_agent(id, &self.conn)
+    }
+
+    fn kill(&mut self, id: Uuid) {
+        let _: () = self.conn.del(id.to_string()).unwrap();
+        let _: () = self.conn.srem("population", id.to_string()).unwrap();
     }
 }
 
 pub struct DistManager<S: Simulation> {
-    conn: redis::Connection,
-    simulation: PhantomData<S>,
+    conn: Connection,
+    pub population: DistPopulation<S::State>,
 }
 
 impl<S: Simulation + 'static> Manager<S> for DistManager<S> {
     fn decide(&mut self) -> () {
         // TODO create tasks for each agent
+        // actually...in the current implementation this doesn't really have to do anything?
     }
     fn update(&mut self) -> () {
         // TODO create tasks for each agent
+        // actually...in the current implementation this doesn't really have to do anything?
     }
 }
 
 impl<S: Simulation> DistManager<S> {
-    fn new(addr: &str, world: S::World) -> DistManager<S> {
-        let client = redis::Client::open(addr).unwrap();
-        // TODO where does the world go
+    pub fn new(addr: &str, world: S::World) -> DistManager<S> {
+        let client = Client::open(addr).unwrap();
+        let conn = client.get_connection().unwrap();
+
+        let data = encode(&world).unwrap();
+        let _: () = conn.set("world", data).unwrap();
+
         DistManager {
-            conn: client.get_connection().unwrap(),
-            simulation: PhantomData,
+            conn: conn,
+            population: DistPopulation::new(addr),
         }
     }
-}
 
-#[derive(RustcDecodable, RustcEncodable, Debug, PartialEq, Clone)]
-pub enum DistTask<S: State> {
-    Decide(String, S),
-    Update(String, S),
+    pub fn world(&self) -> S::World {
+        let data = self.conn.get("world").unwrap();
+        decode(data).unwrap()
+    }
 }
 
 pub struct DistWorker<S: Simulation> {
@@ -110,41 +126,62 @@ impl<S: Simulation> DistWorker<S> {
     }
 
     pub fn start(&self, simulation: S) {
-        let client = redis::Client::open(self.addr.deref()).unwrap();
-        let queue = {
-            let conn = client.get_connection().unwrap();
-            Queue::new("default".into(), conn)
-        };
+        let client = Client::open(self.addr.deref()).unwrap();
         let conn = client.get_connection().unwrap();
-        // TODO need to check new world, not just get it once
+        loop {
+            self.decide(&simulation, &conn);
+
+            // check that all agents are ready to update
+            while conn.scard::<&str, usize>("to_update").unwrap() !=
+                  conn.scard::<&str, usize>("population").unwrap() {
+            }
+
+            self.update(&simulation, &conn);
+
+            // check that all agents are ready to decide
+            while conn.scard::<&str, usize>("to_decide").unwrap() !=
+                  conn.scard::<&str, usize>("population").unwrap() {
+            }
+        }
+    }
+
+    fn decide(&self, simulation: &S, conn: &Connection) {
         let world: S::World = {
             let world_data = conn.get("world").unwrap();
             decode(world_data).unwrap()
         };
-        while let Some(task) = queue.next::<DistTask<S::State>>() {
-            let task = task.unwrap();
-            match task.inner() {
-                &DistTask::Decide(ref id, ref state) => {
-                    let agent = Agent {
-                        id: Uuid::parse_str(&id).unwrap(),
-                        state: state.clone(),
-                    };
+        while let Ok(id) = conn.spop::<&str, String>("to_decide") {
+            let id = Uuid::parse_str(&id).unwrap();
+            match get_agent::<S::State>(id, &conn) {
+                Some(agent) => {
                     let updates = simulation.decide(agent, world.clone(), &self.population);
-                    for update in updates {
+                    let mut rpipe = pipe();
+                    for (id, update) in updates {
                         let data = encode(&update).unwrap();
-                        let _: () = conn.lpush(format!("updates:{}", id), data).unwrap();
+                        let rpipe = rpipe.lpush(format!("updates:{}", id), data);
                     }
+                    let rpipe = rpipe.sadd("to_update", id.to_string());
+                    let _: () = rpipe.query(conn).unwrap();
                 }
-                &DistTask::Update(ref id, ref state) => {
-                    let updates = {
-                        let updates_data = conn.get(format!("updates:{}", id)).unwrap();
-                        decode(updates_data).unwrap()
-                    };
-                    let new_state = simulation.update(state.clone(), updates);
+                None => (),
+            }
+        }
+    }
 
-                    let data = encode(&new_state).unwrap();
-                    let _: () = conn.set(id, data).unwrap();
+    fn update(&self, simulation: &S, conn: &Connection) {
+        while let Ok(id) = conn.spop::<&str, String>("to_update") {
+            let updates = {
+                let updates_data = conn.lrange(format!("updates:{}", id), 0, -1).unwrap();
+                decode(updates_data).unwrap()
+            };
+            let id = Uuid::parse_str(&id).unwrap();
+            match get_agent::<S::State>(id, &conn) {
+                Some(agent) => {
+                    let new_state = simulation.update(agent.state.clone(), updates);
+                    set_agent(id, new_state, &conn);
+                    let _: () = conn.sadd("to_decide", id.to_string()).unwrap();
                 }
+                None => (),
             }
         }
     }
