@@ -8,3 +8,5 @@ extern crate rmp_serialize;
 mod simulation;
 mod distributed;
 mod local;
+
+pub use simulation::{Update, State, Simulation};

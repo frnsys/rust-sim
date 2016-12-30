@@ -10,38 +10,43 @@ pub trait Update
 }
 impl<T> Update for T where T: Decodable + Encodable + Debug + Send + Sync + Clone + PartialEq {}
 
-pub trait World: Decodable + Encodable + Debug + Send + Sync + Clone {}
-impl<T> World for T where T: Decodable + Encodable + Debug + Send + Sync + Clone {}
-
+/// Agents are just structures containing a unique id and a state.
 #[derive(RustcDecodable, RustcEncodable, Debug, PartialEq, Clone)]
 pub struct Agent<S: State> {
     pub id: Uuid,
     pub state: S,
 }
 
+/// This trait's implementation defines the main logic of a simulation.
+/// A single simulation step consists of two synchronized phases:
+/// 1. `decide`: this is a _read-only_ phase where agents decide on what _updates_ to apply. The
+///    updates themselves are _not_ applied in this phase.
+/// 2. `update`: this is a phase where agents consider queued updates and compute a new state
+///    accordingly.
 pub trait Simulation: Send + Sync + Clone {
     type State: State;
+    type World: State;
     type Update: Update;
-    type World: World;
 
-    fn apply_update(&self, state: Self::State, update: Self::Update) -> Self::State;
+    /// Computes updates for the specified agents and/or other agents.
     fn decide<P: Population<Self::State>>(&self,
                                           agent: Agent<Self::State>,
                                           world: Self::World,
                                           population: &P)
                                           -> Vec<(Uuid, Self::Update)>;
-    fn update(&self, state: Self::State, mut updates: Vec<Self::Update>) -> Self::State {
-        let mut state = state.clone();
-        for update in updates.drain(..) {
-            state = self.apply_update(state, update.clone());
-        }
-        state
-    }
+
+    /// Compute a final updated state given a starting state and updates.
+    fn update(&self, state: Self::State, mut updates: Vec<Self::Update>) -> Self::State;
 }
 
 pub trait Population<S: State> {
+    /// Create a new agent with the specified state, returning the new agent's id.
     fn spawn(&mut self, state: S) -> Uuid;
+
+    /// Get an agent by id.
     fn get(&self, id: Uuid) -> Option<Agent<S>>;
+
+    /// Deletes an agent by id.
     fn kill(&mut self, id: Uuid) -> ();
 }
 
