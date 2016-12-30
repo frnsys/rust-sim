@@ -1,27 +1,13 @@
-#![feature(unboxed_closures)]
-#![feature(conservative_impl_trait)]
-extern crate rand;
 extern crate futures;
 extern crate futures_cpupool;
-extern crate tokio_core;
-extern crate tokio_proto;
-extern crate tokio_service;
-extern crate rmp_serialize;
 extern crate rustc_serialize;
 
-mod proto;
-mod router;
-
 use std::fmt::Debug;
-use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 use futures::{future, collect, Future};
 use futures_cpupool::{CpuPool, CpuFuture};
-use rand::{thread_rng, Rng, sample};
 use std::collections::hash_map::HashMap;
 use rustc_serialize::{Decodable, Encodable};
-use proto::Message;
-use router::Client;
 
 pub trait State: Decodable + Encodable + Debug + Send + Sync + Clone + PartialEq {}
 impl<T> State for T where T: Decodable + Encodable + Debug + Send + Sync + Clone + PartialEq {}
@@ -31,310 +17,140 @@ pub trait Update
 }
 impl<T> Update for T where T: Decodable + Encodable + Debug + Send + Sync + Clone + PartialEq {}
 
-pub trait Manager<A: Agent>: Send + Sync + 'static {
-    fn new(world: A::World) -> Self;
-    fn push_updates(&mut self) -> ();
-    fn setup(&mut self) -> ();
-    fn decide(&mut self) -> ();
-    fn update(&mut self) -> ();
-    fn world(&self) -> A::World;
-}
-
 pub trait World: Decodable + Encodable + Debug + Send + Sync + Clone {}
 impl<T> World for T where T: Decodable + Encodable + Debug + Send + Sync + Clone {}
 
-pub trait Agent: Send + Sync + Sized + Clone {
+pub trait Manager<S: Simulation>: Send + Sync + 'static {
+    fn new(world: S::World) -> Self;
+    fn decide(&mut self) -> ();
+    fn update(&mut self) -> ();
+}
+
+pub trait Simulation: Send + Sync + Clone {
     type State: State;
     type Update: Update;
     type World: World;
-    fn new(state: Self::State, id: usize) -> Self;
-    fn id(&self) -> usize;
-    fn setup(&mut self, world: &Self::World) -> ();
-    fn decide(&self,
-              world: Self::World,
-              population: SharedPopulation<Self>)
-              -> Vec<(AgentPath, Self::Update)>;
-    fn state(&self) -> Self::State;
-    fn set_state(&mut self, state: Self::State) -> ();
-    fn updates(&self) -> &Vec<Self::Update>;
-    fn queue_updates(&mut self, updates: &mut Vec<Self::Update>) -> ();
+
+    fn new(world: Self::World) -> Self;
     fn apply_update(&self, state: Self::State, update: Self::Update) -> Self::State;
-    fn update(&mut self) -> () {
-        let mut state = self.state();
-        for update in self.updates() {
+    fn decide<P>(&self,
+                 agent: Agent<Self::State>,
+                 world: Self::World,
+                 population: SharedPopulation<P>)
+                 -> Vec<(usize, Self::Update)>;
+    fn update(&self, agent: &mut Agent<Self::State>, mut updates: Vec<Self::Update>) -> () {
+        let mut state = agent.state.clone();
+        for update in updates.drain(..) {
             state = self.apply_update(state, update.clone());
         }
-        // TODO reset updates
-        self.set_state(state);
+        agent.state = state;
     }
-}
-
-#[derive(RustcDecodable, RustcEncodable, PartialEq, Eq, Hash, Debug, Clone)]
-pub enum AgentPath {
-    Local(usize),
-    // Remote(usize, SocketAddr), TODO -> RemoteAddr?
-    Remote(usize, String),
 }
 
 #[derive(RustcDecodable, RustcEncodable, Debug, PartialEq, Clone)]
-pub struct AgentProxy<A: Agent> {
-    pub path: AgentPath,
-    pub state: A::State,
+pub struct Agent<S: State> {
+    pub id: usize,
+    pub state: S,
 }
 
-#[derive(RustcDecodable, RustcEncodable, Debug, PartialEq)]
-pub enum PopulationReq<A: Agent, M: Message> {
-    Spawn(A::State),
-    Get(AgentPath),
-    Sample(usize),
-    Call(M),
+pub trait Population<S: State> {
+    fn spawn(&mut self, state: S) -> usize;
+    fn get(&self, id: usize) -> Option<Agent<S>>;
 }
 
-#[derive(RustcDecodable, RustcEncodable, Debug, PartialEq)]
-pub enum PopulationRes<A: Agent> {
-    Err(String),
-    Agent(AgentProxy<A>),
-    Agents(Vec<AgentProxy<A>>),
-}
+pub type SharedPopulation<Population> = Arc<RwLock<Population>>;
 
 #[derive(Debug, Clone)]
-pub struct Population<A: Agent> {
+pub struct LocalPopulation<S: State> {
     last_id: usize,
-    pub local: HashMap<usize, A>,
-    remote: HashMap<String, Client>,
+    pub agents: HashMap<usize, Agent<S>>,
 }
 
-// ok so maybe only the commander/arbiter node
-// needs to reference multiple populations
-// a population itself doesn't need to do that!
-// so we have local populations and remote populations,
-// the latter of which are essentially clients
-// eh actually i dont think that'd work, b/c each local node may need to access the full population
-//
-// the ROUTER/SERVER and CLIENT should be separated. the router only needs to live on the manager,
-// and the population should be managed by it (e.g. Router->Population rather than
-// Population->Router)
-// the population however needs clients to connect to other populations
-
-impl<A: Agent> Population<A> {
-    pub fn new() -> Population<A> {
-        Population {
+impl<S: State> LocalPopulation<S> {
+    pub fn new() -> LocalPopulation<S> {
+        LocalPopulation {
             last_id: 0,
-            local: HashMap::<usize, A>::new(),
-            remote: HashMap::<String, Client>::new(),
+            agents: HashMap::<usize, Agent<S>>::new(),
         }
     }
+}
 
-    pub fn spawn(&mut self, state: A::State) -> usize {
-        let agent = A::new(state, self.last_id);
-        self.local.insert(self.last_id, agent);
+impl<S: State> Population<S> for LocalPopulation<S> {
+    fn spawn(&mut self, state: S) -> usize {
+        let agent = Agent {
+            state: state,
+            id: self.last_id,
+        };
+        self.agents.insert(self.last_id, agent);
         self.last_id += 1;
-        self.last_id - 1 // TODO this should return the path or proxy
+        self.last_id - 1
     }
 
-    // fn select(&self, M:
-
-    fn call_remote(&self, addr: String, req: PopulationReq) -> PopulationRes {
-        // TODO
-    }
-
-    pub fn get_remote(&self, addr: String, path: AgentPath) -> Option<AgentProxy<A>> {
-        let res = self.call_remote(addr, PopulationReq::Get(path));
-        match res {
-            PopulationRes::Agent(proxy) => Some(proxy),
-            _ => None,
-        }
-    }
-
-    pub fn spawn_remote(&self, state: A::State) -> Option<AgentProxy<A>> {
-        let res = self.call_remote(PopulationReq::Spawn(state));
-        match res {
-            PopulationRes::Agent(proxy) => Some(proxy),
-            _ => None,
-        }
-        // TODO
-    }
-
-    pub fn get(&self, path: AgentPath) -> Option<AgentProxy<A>> {
-        match path {
-            AgentPath::Local(id) => {
-                match self.local.get(&id) {
-                    Some(a) => {
-                        Some(AgentProxy {
-                            path: path,
-                            state: a.state(),
-                        })
-                    }
-                    _ => None,
-                }
-            }
-            _ => None,
-        }
-    }
-
-    // TODO for now this returns a Box, ideally we could just use `impl trait` but it doesn't work
-    // on traits atm
-    // fn filter<'a, P>(&'a self, predicate: &'a P) -> impl Iterator<Item = AgentProxy<A>> + 'a
-    /// TODO when we connect in remote managers, this should probably return a future iterator
-    pub fn filter<'a, P>(&'a self, predicate: &'a P) -> Box<Iterator<Item = AgentProxy<A>> + 'a>
-        where P: Fn(A::State) -> bool
-    {
-        let iter = self.local
-            .iter()
-            .filter(move |&(_, ref a)| predicate(a.state()))
-            .map(|(&id, ref a)| {
-                AgentProxy {
-                    path: AgentPath::Local(id),
-                    state: a.state(),
-                }
-            });
-        Box::new(iter)
-        // TODO remote local
-    }
-
-    // TODO problem with these is they may sample themselves
-    pub fn sample(&self, n: usize) -> Vec<AgentProxy<A>> {
-        let mut rng = thread_rng();
-        let iter = self.local.iter().map(|(&id, ref a)| {
-            AgentProxy {
-                path: AgentPath::Local(id),
-                state: a.state(),
-            }
-        });
-        sample(&mut rng, iter, n)
-    }
-
-    pub fn sample_by<'a, P>(&'a self,
-                            predicate: &'a P,
-                            n: usize)
-                            -> Box<Iterator<Item = AgentProxy<A>> + 'a>
-        where P: Fn(A::State) -> f64
-    {
-        // hashmap iteration order is arbitrary
-        // so no need to shuffle?
-        let mut rng = rand::thread_rng();
-        let iter = self.local
-            .iter()
-            .filter(move |&(_, ref a)| {
-                let prob = predicate(a.state());
-                let roll: f64 = rng.gen();
-                roll <= prob
-            });
-
-        // TODO this doesn't work
-        // let iter = if n > 0 { iter.take(n) } else { iter };
-
-        let iter = iter.take(n).map(|(&id, ref a)| {
-            AgentProxy {
-                path: AgentPath::Local(id),
-                state: a.state(),
-            }
-        });
-        Box::new(iter)
-    }
-
-    /// TODO this should probably return a future as well
-    pub fn find<P>(&self, predicate: P) -> Option<AgentProxy<A>>
-        where P: Fn(A::State) -> bool
-    {
-        let res = self.local.iter().find(move |&(_, ref a)| predicate(a.state()));
-        match res {
-            Some((id, a)) => {
-                Some(AgentProxy {
-                    path: AgentPath::Local(*id),
-                    state: a.state(),
+    fn get(&self, id: usize) -> Option<Agent<S>> {
+        match self.agents.get(&id) {
+            Some(a) => {
+                Some(Agent {
+                    id: a.id,
+                    state: a.state.clone(),
                 })
             }
             None => None,
         }
-        // TODO remote local
     }
 }
 
-pub type SharedPopulation<A: Agent> = Arc<RwLock<Population<A>>>;
-
-// Managers:
-// -- single threaded
-// -- multi threaded
-// -- multi machine (requires a router)
-// the manager needs to be able to sync the world across machines
-// but the world also needs access to the local population, e.g.
-// to find connected agents in a network
-pub struct LocalManager<A: Agent> {
-    updates: HashMap<AgentPath, Vec<A::Update>>,
-    world: A::World,
-    pub population: SharedPopulation<A>,
+pub struct LocalManager<S: Simulation> {
+    updates: HashMap<usize, Vec<S::Update>>,
+    world: S::World,
+    pub population: SharedPopulation<LocalPopulation<S::State>>,
+    simulation: S,
 }
 
-impl<A: Agent + 'static> Manager<A> for LocalManager<A> {
-    fn new(world: A::World) -> LocalManager<A> {
+impl<S: Simulation + 'static> Manager<S> for LocalManager<S> {
+    fn new(world: S::World) -> LocalManager<S> {
         LocalManager {
-            updates: HashMap::<AgentPath, Vec<A::Update>>::new(),
-            world: world,
-            population: Arc::new(RwLock::new(Population::new())),
+            updates: HashMap::<usize, Vec<S::Update>>::new(),
+            world: world.clone(),
+            population: Arc::new(RwLock::new(LocalPopulation::new())),
+            simulation: S::new(world),
         }
     }
 
-    fn world(&self) -> A::World {
-        self.world.clone()
-    }
-
-    /// Pushes queued updates to agents.
-    fn push_updates(&mut self) {
-        let mut population = self.population.write().unwrap();
-        for (proxy, updates) in self.updates.iter_mut() {
-            match proxy {
-                &AgentPath::Local(id) => {
-                    match population.local.get_mut(&id) {
-                        Some(agent) => agent.queue_updates(updates),
-                        None => println!("No local agent with id {}", id), // TODO this should probably log an error
-                    }
-                }
-                _ => (),
-            }
-        }
-        self.updates.clear();
-    }
-
-    /// Calls the `setup` method on all local agents.
-    fn setup(&mut self) {
-        let mut population = self.population.write().unwrap();
-        for agent in population.local.values_mut() {
-            agent.setup(&self.world);
-        }
-    }
-
-    /// Calls the `decide` method on all local agents.
+    /// Calls the `decide` method on all agents.
     fn decide(&mut self) {
         let mut futs = Vec::new();
         let pool = CpuPool::new_num_cpus();
         let world = self.world.clone();
         let pop = self.population.read().unwrap();
-        for agent in pop.local.values() {
+        for agent in pop.agents.values() {
             let pop = self.population.clone();
             let agent = agent.clone();
             let world = world.clone();
-            let f: CpuFuture<Vec<(AgentPath, A::Update)>, ()> =
-                pool.spawn(future::lazy(move || future::finished(agent.decide(world, pop))));
+            let sim = self.simulation.clone();
+            let f: CpuFuture<Vec<(usize, S::Update)>, ()> =
+                pool.spawn(future::lazy(move || future::finished(sim.decide(agent, world, pop))));
             futs.push(f);
         }
 
         let f = collect(futs);
         let updates_list = f.wait().unwrap();
         for updates in updates_list {
-            for (path, update) in updates {
-                let mut entry = self.updates.entry(path).or_insert(Vec::new());
+            for (id, update) in updates {
+                let mut entry = self.updates.entry(id).or_insert(Vec::new());
                 entry.push(update);
             }
         }
     }
 
-    /// Calls the `update` method on all local agents.
+    /// Calls the `update` method on all agents.
     fn update(&mut self) {
-        self.push_updates();
         let mut population = self.population.write().unwrap();
-        for (_, agent) in population.local.iter_mut() {
-            agent.update();
+        for (id, updates) in self.updates.drain() {
+            match population.agents.get_mut(&id) {
+                Some(agent) => self.simulation.update(agent, updates),
+                None => println!("No agent with id {}", id), // TODO this should probably log an error
+            }
         }
+        self.updates.clear();
     }
 }
