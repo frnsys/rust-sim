@@ -30,7 +30,7 @@ impl Simulation for MySimulation {
     type World = MyWorld;
 
     fn setup(&self, agent: Agent<Self::State>, population: &Population<Self>) -> () {
-        population.index(agent.state.name.as_ref(), &agent);
+        population.index(agent.state.name.as_ref(), agent.id.clone());
     }
 
     fn decide(&self,
@@ -88,8 +88,6 @@ fn main() {
     let world = MyWorld { weather: "sunny".to_string() };
     let sim = MySimulation {};
     let mut manager = Manager::<MySimulation>::new(addr, sim, world);
-
-    manager.population.reset_indices();
 
     manager.population.spawn(state.clone());
     let id = manager.population.spawn(state2.clone());

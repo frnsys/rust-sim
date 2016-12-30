@@ -3,95 +3,64 @@ extern crate time;
 extern crate rand;
 extern crate rustc_serialize;
 
+use std::thread;
 use time::PreciseTime;
 use rand::{thread_rng, Rng, sample};
-use sim::{Agent, Manager, LocalManager, AgentProxy, AgentPath, SharedPopulation};
+use sim::{Agent, Manager, Simulation, Population, Worker, Uuid};
 
-// TODO may be possible to even do an enum of states? that's how you could represent different
-// agent types
 #[derive(RustcDecodable, RustcEncodable, Debug, PartialEq, Clone)]
 pub struct State {
     altruism: f64,
     frugality: f64,
 }
 
-#[derive(Debug, Clone)]
-pub struct Person {
-    id: usize,
-    state: State,
-    updates: Vec<Update>,
-    friends: Vec<AgentPath>,
-}
-
-#[derive(RustcDecodable, RustcEncodable, Debug, Clone)]
+#[derive(RustcDecodable, RustcEncodable, Debug, PartialEq, Clone)]
 pub struct World {}
-
-impl World {
-    pub fn new() -> World {
-        World {}
-    }
-}
 
 #[derive(RustcDecodable, RustcEncodable, Debug, PartialEq, Clone)]
 pub enum Update {
     Imitate(State),
 }
 
-impl Agent for Person {
+#[derive(Clone)]
+pub struct CultureSimulation;
+
+impl Simulation for CultureSimulation {
     type State = State;
     type Update = Update;
     type World = World;
-    fn new(state: State, id: usize) -> Person {
-        Person {
-            id: id,
-            state: state,
-            updates: Vec::new(),
-            friends: Vec::new(),
-        }
-    }
-    fn id(&self) -> usize {
-        self.id
-    }
-    fn setup(&mut self, world: &Self::World) -> () {}
+
+    fn setup(&self, agent: Agent<Self::State>, population: &Population<Self>) -> () {}
+
     fn decide(&self,
+              agent: Agent<Self::State>,
               world: Self::World,
-              population: SharedPopulation<Self>)
-              -> Vec<(AgentPath, Self::Update)> {
+              population: &Population<Self>)
+              -> Vec<(Uuid, Self::Update)> {
         let mut updates = Vec::new();
 
-        let pop = population.read().unwrap();
-        for friend_path in self.friends.iter() {
-            let friend = match pop.get(friend_path.clone()) {
-                Some(a) => a,
-                None => panic!("couldnt find friend: {:?}", friend_path),
-            };
-            updates.push((AgentPath::Local(self.id), Update::Imitate(friend.state.clone())));
+        let friends = population.lookup(agent.id.to_string().as_ref());
+
+        for friend in friends {
+            updates.push((agent.id.clone(), Update::Imitate(friend.state.clone())));
         }
         updates
     }
-    fn state(&self) -> State {
-        self.state.clone()
-    }
-    fn set_state(&mut self, state: State) -> () {
-        self.state = state;
-    }
-    fn updates(&self) -> &Vec<Update> {
-        &self.updates
-    }
-    fn queue_updates(&mut self, updates: &mut Vec<Update>) -> () {
-        self.updates.append(updates);
-    }
-    fn apply_update(&self, state: State, update: Update) -> Self::State {
-        match update {
-            Update::Imitate(state) => {
-                let diff_altruism = state.altruism - self.state.altruism;
-                let diff_frugality = state.frugality - self.state.frugality;
-                State {
-                    altruism: state.altruism + diff_altruism * 0.01,
-                    frugality: state.frugality + diff_frugality * 0.01,
+    fn update(&self, state: State, updates: Vec<Update>) -> Self::State {
+        let mut state = state.clone();
+        for update in updates {
+            state = match update {
+                Update::Imitate(s) => {
+                    let diff_altruism = s.altruism - state.altruism;
+                    let diff_frugality = s.frugality - state.frugality;
+                    State {
+                        altruism: s.altruism + diff_altruism * 0.01,
+                        frugality: s.frugality + diff_frugality * 0.01,
+                    }
                 }
             }
         }
+        state
     }
 }
 
@@ -107,21 +76,22 @@ fn main() {
         frugality: 1.,
     };
 
-    let world = World::new();
-    let mut manager = LocalManager::<Person>::new(world);
+    let world = World {};
+    let addr = "redis://127.0.0.1/";
+    let sim = CultureSimulation {};
+    let mut manager = Manager::<CultureSimulation>::new(addr, sim, world);
 
     let mut ids = Vec::new();
     let mut rng = thread_rng();
     {
-        let mut pop = manager.population.write().unwrap();
-        for i in 0..2000 {
+        for _ in 0..200 {
             let roll: f64 = rng.gen();
             let s = if roll <= 0.5 {
                 state.clone()
             } else {
                 state2.clone()
             };
-            let id = pop.spawn(s);
+            let id = manager.population.spawn(s);
             ids.push(id);
         }
     }
@@ -129,39 +99,41 @@ fn main() {
     {
         // assign friends
         let n_friends = 10;
-        let mut pop = manager.population.write().unwrap();
         for id in ids.clone() {
-            match pop.local.get_mut(&id) {
-                Some(a) => {
-                    let friends = sample(&mut rng, ids.clone(), n_friends);
-                    for id in friends {
-                        a.friends.push(AgentPath::Local(id));
-                    }
-                }
-                _ => (),
+            let friends = sample(&mut rng, ids.clone(), n_friends);
+            for fid in friends {
+                manager.population.index(id.to_string().as_ref(), fid);
             }
         }
     }
 
-    manager.setup();
-
     let end = PreciseTime::now();
     println!("setup took: {}", start.to(end));
 
-    for i in 0..10 {
-        let start = PreciseTime::now();
-        manager.decide();
-        manager.update();
-        let end = PreciseTime::now();
-        println!("step took: {}", start.to(end));
-    }
 
-    {
-        let pop = manager.population.read().unwrap();
-        let a = pop.get(AgentPath::Local(1)).unwrap();
-        println!("{:?}", a);
-        let a = pop.get(AgentPath::Local(0)).unwrap();
-        println!("{:?}", a);
-        println!("ok");
-    }
+    let start = PreciseTime::now();
+    let worker_t = thread::spawn(move || {
+        let sim = CultureSimulation {};
+        let worker = Worker::new(addr, sim);
+        worker.start();
+    });
+
+    let n_steps = 10;
+    let manager_t = thread::spawn(move || {
+        manager.start(n_steps);
+        manager
+    });
+
+    manager = manager_t.join().unwrap();
+    worker_t.join().unwrap();
+
+    let end = PreciseTime::now();
+    println!("run took: {}", start.to(end));
+
+    let id = ids[0];
+    let agent = match manager.population.get(id) {
+        Some(a) => a,
+        None => panic!("Couldn't find the agent"),
+    };
+    println!("{:?}", agent);
 }

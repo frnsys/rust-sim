@@ -58,7 +58,6 @@ impl<S: Simulation> Population<S> {
         let id = Uuid::new_v4();
         set_agent(id, state.clone(), &self.conn);
         let _: () = self.conn.sadd("population", id.to_string()).unwrap();
-        let _: () = self.conn.sadd("to_update", id.to_string()).unwrap();
         self.simulation.setup(Agent {
                                   id: id,
                                   state: state.clone(),
@@ -108,14 +107,16 @@ impl<S: Simulation> Population<S> {
     }
 
     /// Add an agent (id) to an index.
-    pub fn index(&self, index: &str, agent: &Agent<S::State>) {
-        let _: () = self.conn.sadd(format!("idx:{}", index), agent.id.to_string()).unwrap();
+    pub fn index(&self, index: &str, id: Uuid) {
+        let _: () = self.conn.sadd(format!("idx:{}", index), id.to_string()).unwrap();
     }
 
     /// Reset indices.
     pub fn reset_indices(&self) {
         let keys: Vec<String> = self.conn.keys("idx:*").unwrap();
-        let _: () = self.conn.del(keys).unwrap();
+        if keys.len() > 0 {
+            let _: () = self.conn.del(keys).unwrap();
+        }
     }
 }
 
@@ -139,12 +140,15 @@ impl<S: Simulation> Manager<S> {
         let _: () = conn.del("to_decide").unwrap();
         let _: () = conn.del("to_update").unwrap();
 
+        let population = Population::new(addr, simulation);
+        population.reset_indices();
+
         // start with "idle" phase
         let _: () = conn.set("current_phase", "idle").unwrap();
 
         Manager {
             conn: conn,
-            population: Population::new(addr, simulation),
+            population: population,
         }
     }
 
@@ -160,6 +164,7 @@ impl<S: Simulation> Manager<S> {
             println!("Waiting for at least one worker...");
             while self.n_workers() == 0 {
             }
+            println!("Ok");
         }
 
         // copy population to the "to_decide" set
