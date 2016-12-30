@@ -35,6 +35,7 @@ fn set_agent<S: State>(id: Uuid, state: S, conn: &Connection) {
     let _: () = conn.set(id.to_string(), data).unwrap();
 }
 
+/// An interface to the agent population.
 pub struct Population<S: State> {
     conn: Connection,
     state: PhantomData<S>,
@@ -48,9 +49,11 @@ impl<S: State> Population<S> {
             state: PhantomData,
         }
     }
-}
 
-impl<S: State> Population<S> {
+    pub fn count(&self) -> usize {
+        self.conn.scard::<&str, usize>("population").unwrap()
+    }
+
     /// Create a new agent with the specified state, returning the new agent's id.
     pub fn spawn(&self, state: S) -> Uuid {
         let id = Uuid::new_v4();
@@ -78,23 +81,17 @@ pub struct Manager<S: Simulation> {
 }
 
 impl<S: Simulation> Manager<S> {
-    fn decide(&self) -> () {
-        // TODO create tasks for each agent
-        // actually...in the current implementation this doesn't really have to do anything?
-    }
-    fn update(&self) -> () {
-        // TODO create tasks for each agent
-        // actually...in the current implementation this doesn't really have to do anything?
-    }
-}
-
-impl<S: Simulation> Manager<S> {
     pub fn new(addr: &str, world: S::World) -> Manager<S> {
         let client = Client::open(addr).unwrap();
         let conn = client.get_connection().unwrap();
 
         let data = encode(&world).unwrap();
         let _: () = conn.set("world", data).unwrap();
+
+        // Reset sets
+        let _: () = conn.del("population").unwrap();
+        let _: () = conn.del("to_decide").unwrap();
+        let _: () = conn.del("to_update").unwrap();
 
         Manager {
             conn: conn,
@@ -105,6 +102,15 @@ impl<S: Simulation> Manager<S> {
     pub fn world(&self) -> S::World {
         let data = self.conn.get("world").unwrap();
         decode(data).unwrap()
+    }
+
+    pub fn start(&self, n_steps: usize) -> () {
+        // TODO this won't quite work with how things are currently
+        // for i in 0..n_steps {
+        // }
+
+        // Just copy population to the "to_decide" set
+        let _: () = self.conn.sunionstore("to_decide", "population").unwrap();
     }
 }
 
@@ -146,6 +152,7 @@ impl<S: Simulation> Worker<S> {
             let world_data = conn.get("world").unwrap();
             decode(world_data).unwrap()
         };
+
         while let Ok(id) = conn.spop::<&str, String>("to_decide") {
             let id = Uuid::parse_str(&id).unwrap();
             match get_agent::<S::State>(id, &conn) {
@@ -166,9 +173,13 @@ impl<S: Simulation> Worker<S> {
 
     fn update(&self, simulation: &S, conn: &Connection) {
         while let Ok(id) = conn.spop::<&str, String>("to_update") {
-            let updates = {
-                let updates_data = conn.lrange(format!("updates:{}", id), 0, -1).unwrap();
-                decode(updates_data).unwrap()
+            let updates: Vec<S::Update> = {
+                let updates_data: Vec<u8> = conn.lrange(format!("updates:{}", id), 0, -1).unwrap();
+                if updates_data.len() == 0 {
+                    Vec::new()
+                } else {
+                    decode(updates_data).unwrap()
+                }
             };
             let id = Uuid::parse_str(&id).unwrap();
             match get_agent::<S::State>(id, &conn) {
