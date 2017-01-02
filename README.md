@@ -1,0 +1,1 @@
+this has been moved into the main [djinn repo](https://github.com/MachineColony/djinn)
